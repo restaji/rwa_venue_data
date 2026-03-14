@@ -55,17 +55,17 @@ ASSETS: Dict[str, AssetConfig] = {
     'AAPL':   AssetConfig('AAPL/USD', 'AAPL',   'stock',     'AAPL',  113, 'AAPLUSDT', 'AAPLUSD', None,         10000275),
     'MSFT':   AssetConfig('MSFT/USD', 'MSFT',   'stock',     'MSFT',  115, 'MSFTUSDT', 'MSFTUSD', None,         None),
     'GOOG':   AssetConfig('GOOG/USD', 'GOOG',   'stock',     'GOOGL', 116, 'GOOGUSDT', 'GOOGUSD', None,         10000280),
-    'AMZN':   AssetConfig('AMZN/USD', 'AMZN',   'stock',     'AMZN',  114, 'AMZNUSDT', 'AMZNUSD', None,         10000281),
+    'AMZN':   AssetConfig('AMZN/USD', 'AMZN',   'stock',     'AMZN',  114, 'AMZNUSDT', 'AMZNUSD', None,         10000281, None, 'AMZN_USDT_Perp'),
     'META':   AssetConfig('META/USD', 'META',   'stock',     'META',  117, 'METAUSDT', 'METAUSD', None,         10000290),
     'NVDA':   AssetConfig('NVDA/USD', 'NVDA',   'stock',     'NVDA',  110, 'NVDAUSDT', 'NVDAUSD', None,         10000272),
-    'TSLA':   AssetConfig('TSLA/USD', 'TSLA',   'stock',     'TSLA',  112, 'TSLAUSDT', 'TSLAUSD', None,         10000273, None,         'TSLA_USDT_Perp'),
+    'TSLA':   AssetConfig('TSLA/USD', 'TSLA',   'stock',     'TSLA',  112, 'TSLAUSDT', 'TSLAUSD', None,         10000273, None, 'TSLA_USDT_Perp'),
 
     # Indices
     'SPY':    AssetConfig('SPY/USD',  'SPY',    'index',     None,    128, None,       'SPYUSD',  None,         10000248),
     'QQQ':    AssetConfig('QQQ/USD',  'QQQ',    'index',     None,    129, 'QQQUSDT',  'QQQUSD',  None,         10000249),
 
     # Other
-    'COIN':   AssetConfig('COIN/USD', 'COIN',   'stock',     'COIN',  109, 'COINUSDT', 'COINUSD', None,         10000274),
+    'COIN':   AssetConfig('COIN/USD', 'COIN',   'stock',     'COIN',  109, 'COINUSDT', 'COINUSD', None,         10000274, None, 'COIN_USDT_Perp'),
 }
 
 
