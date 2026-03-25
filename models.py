@@ -65,7 +65,7 @@ ASSETS: Dict[str, AssetConfig] = {
     'QQQ':    AssetConfig('QQQ/USD',  'QQQ',    'index',     None,    129, 'QQQUSDT',  'QQQUSD',  None,         10000249),
 
     # Other
-    'COIN':   AssetConfig('COIN/USD', 'COIN',   'stock',     'COIN',  109, 'COINUSDT', 'COINUSD', None,         10000274, None, 'COIN_USDT_Perp'),
+    'COIN':   AssetConfig('COIN/USD', 'COIN',   'stock',     'COIN',  109, None,       'COINUSD', None,         10000274, None, 'COIN_USDT_Perp'),
 }
 
 

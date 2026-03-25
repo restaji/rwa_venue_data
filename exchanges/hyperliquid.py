@@ -30,9 +30,9 @@ class HyperliquidAPI:
         self.headers  = {'Content-Type': 'application/json'}
 
         self.max_leverages_cache: Dict = {}
-        self.growth_mode_cache:   Dict = {}   # asset -> either 'enabled' or 'disabled'
-        self.fee_cache:           Dict = {}   # asset -> (taker_bps, maker_bps)
-        self.funding_cache:       Dict = {}   # asset -> funding_1h in hyperliquid
+        self.growth_mode_cache:   Dict = {}   
+        self.fee_cache:           Dict = {}   
+        self.funding_cache:       Dict = {}   
 
         self.deployer_fee_scale: Optional[float] = None
         self.base_taker_rate:    Optional[float] = None
@@ -78,27 +78,39 @@ class HyperliquidAPI:
                 dexes = response.json()
                 for dex in dexes:
                     if dex and dex.get("name") == "xyz":
-                        self.deployer_fee_scale = float(dex.get("deployerFeeScale", 1.0))
+                        v = dex.get("deployerFeeScale")
+                        if v is not None:
+                            self.deployer_fee_scale = float(v)
                     elif dex and dex.get("name") == "flx":
-                        self.flx_deployer_fee_scale = float(dex.get("deployerFeeScale", 1.0))
+                        v = dex.get("deployerFeeScale")
+                        if v is not None:
+                            self.flx_deployer_fee_scale = float(v)
 
             # 2. Base fee rates from userFees API (public zero-address)
             payload  = {"type": "userFees", "user": "0x0000000000000000000000000000000000000001", "dex": "xyz"}
             response = requests.post(self.base_url, json=payload, headers=self.headers, timeout=30)
             if response.status_code == 200:
                 fees = response.json()
-                self.base_taker_rate = float(fees.get("userCrossRate", 0.00045))
-                self.base_maker_rate = float(fees.get("userAddRate",   0.00015))
+                taker = fees.get("userCrossRate")
+                maker = fees.get("userAddRate")
+                if taker is not None:
+                    self.base_taker_rate = float(taker)
+                if maker is not None:
+                    self.base_maker_rate = float(maker)
 
             payload  = {"type": "userFees", "user": "0x0000000000000000000000000000000000000001", "dex": "flx"}
             response = requests.post(self.base_url, json=payload, headers=self.headers, timeout=30)
             if response.status_code == 200:
                 fees = response.json()
-                self.flx_base_taker_rate = float(fees.get("userCrossRate", 0.00045))
-                self.flx_base_maker_rate = float(fees.get("userAddRate",   0.00015))
+                taker = fees.get("userCrossRate")
+                maker = fees.get("userAddRate")
+                if taker is not None:
+                    self.flx_base_taker_rate = float(taker)
+                if maker is not None:
+                    self.flx_base_maker_rate = float(maker)
 
             self.last_fee_fetch = time.time()
-        except Exception as e:
+        except Exception:
             log.exception("Error fetching HL fee config")
 
     def _fetch_metadata(self):
@@ -140,15 +152,13 @@ class HyperliquidAPI:
                             self.funding_cache[key]       = funding_1h
 
             self.last_metadata_fetch = time.time()
-        except Exception as e:
+        except Exception:
             log.exception("Error fetching HL metadata")
 
-    def _calculate_fees_for_asset(self, symbol: str) -> Tuple[float, float]:
+    def _calculate_fees_for_asset(self, symbol: str) -> Tuple[Optional[float], Optional[float]]:
         """
         Calculate taker and maker fees using the official Hyperliquid formula.
-        All values from API – no hardcoding except protocol constants.
-
-        Returns: (taker_fee_bps, maker_fee_bps)
+        Returns (None, None) if fee config has not yet been loaded from the API.
         """
         self._fetch_fee_config()
         self._fetch_metadata()
@@ -168,13 +178,17 @@ class HyperliquidAPI:
                            self.growth_mode_cache.get(plain_symbol, True))
 
         if is_flx:
-            deployer_fee_scale = self.flx_deployer_fee_scale if self.flx_deployer_fee_scale is not None else 1.0
-            base_taker         = self.flx_base_taker_rate    if self.flx_base_taker_rate    is not None else 0.00045
-            base_maker         = self.flx_base_maker_rate     if self.flx_base_maker_rate     is not None else 0.00015
+            if self.flx_base_taker_rate is None or self.flx_deployer_fee_scale is None:
+                return (None, None)
+            deployer_fee_scale = self.flx_deployer_fee_scale
+            base_taker         = self.flx_base_taker_rate
+            base_maker         = self.flx_base_maker_rate
         else:
-            deployer_fee_scale = self.deployer_fee_scale if self.deployer_fee_scale is not None else 1.0
-            base_taker         = self.base_taker_rate    if self.base_taker_rate    is not None else 0.00045
-            base_maker         = self.base_maker_rate    if self.base_maker_rate    is not None else 0.00015
+            if self.base_taker_rate is None or self.deployer_fee_scale is None:
+                return (None, None)
+            deployer_fee_scale = self.deployer_fee_scale
+            base_taker         = self.base_taker_rate
+            base_maker         = self.base_maker_rate
 
         scale_if_hip3 = (deployer_fee_scale + 1) if deployer_fee_scale < 1 else (deployer_fee_scale * 2)
         growth_scale  = HYPERLIQUID_GROWTH_MODE_SCALE if growth_enabled else HYPERLIQUID_NO_GROWTH_MODE_SCALE
@@ -187,10 +201,10 @@ class HyperliquidAPI:
 
         return (taker_fee_bps, maker_fee_bps)
 
-    def get_fees(self, symbol: str) -> Tuple[float, float]:
+    def get_fees(self, symbol: str) -> Tuple[Optional[float], Optional[float]]:
         """
         Get taker and maker fees for a symbol (public API, no auth required).
-        Returns: (taker_fee_bps, maker_fee_bps)
+        Returns: (taker_fee_bps, maker_fee_bps) — both None if fee config not loaded.
         """
         return self._calculate_fees_for_asset(symbol)
 
@@ -388,6 +402,8 @@ class HyperliquidAPI:
           4. If still not filled even on nSigFigs=4: report PARTIAL — never hide it.
         """
         taker_fee_bps, maker_fee_bps = self.get_fees(symbol)
+        if taker_fee_bps is None:
+            return None
 
         # ── Step 1: Fetch default precision and pin true mid ─────────────────
         raw_default = self.get_orderbook(symbol, n_sig_figs=None)

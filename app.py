@@ -26,6 +26,7 @@ from flask_socketio import SocketIO, emit
 
 from models import ASSETS
 from comparator import FeeComparator
+from exchanges.avantis_x import AvantisXAPI
 
 load_dotenv()
 
@@ -83,11 +84,15 @@ def get_assets():
             'name':   config.name,
             'symbol': config.symbol_key,
             'exchanges': {
-                'hyperliquid': config.hyperliquid_symbol is not None,
-                'lighter':     config.lighter_market_id  is not None,
-                'aster':       config.aster_symbol       is not None,
-                'avantis':     True,
-                'ostium':      config.ostium_symbol      is not None,
+                'hyperliquid':  config.hyperliquid_symbol is not None,
+                'lighter':      config.lighter_market_id  is not None,
+                'aster':        config.aster_symbol       is not None,
+                'avantis':      True,
+                'avantis_x':    config.symbol_key in AvantisXAPI.LMAX_INSTRUMENTS,
+                'ostium':       config.ostium_symbol      is not None,
+                'extended':     config.extended_symbol    is not None,
+                'edgex':        config.edgex_contract_id  is not None,
+                'grvt':         config.grvt_instrument    is not None,
             },
         })
     return jsonify({'assets': assets_list})

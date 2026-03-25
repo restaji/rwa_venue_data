@@ -49,7 +49,7 @@ class AvantisAPI:
             self._pair_data  = data.get("pairInfos", {})
             self._group_info = data.get("groupInfo", {})
             self._last_fetch = now
-        except Exception as e:
+        except Exception:
             log.exception("Avantis API error")
             self._pair_data  = {}
             self._group_info = {}
@@ -141,7 +141,7 @@ class AvantisAPI:
             'slippage_type':        'opening_closing',
             'open_fee_bps':         open_fee_bps,
             'close_fee_bps':        close_fee_bps,
-            'maker_fee_bps':        0.0,
+            'maker_fee_bps':        open_fee_bps,
             'total_cost_bps':       total_cost,
             'filled':               filled,
             'order_size_usd':       order_size_usd,

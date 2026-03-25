@@ -40,7 +40,6 @@ class AsterAPI:
         "TSLA":   "TSLAUSDT",
         "AAPL":   "AAPLUSDT",
         "MSFT":   "MSFTUSDT",
-        "COIN":   "COINUSDT",
         "AMZN":   "AMZNUSDT",
         "GOOG":   "GOOGUSDT",
         "META":   "METAUSDT",
@@ -49,11 +48,14 @@ class AsterAPI:
         "QQQ":    "QQQUSDT",
     }
 
+    FEE_FAIL_TTL = 60  # seconds before retrying a failed fee lookup
+
     def __init__(self):
         self.headers = {'Content-Type': 'application/json'}
         self.leverage_cache: Dict        = {}   # symbol -> max_leverage
         self.leverage_cache_loaded: Dict = {}   # symbol -> bool
         self.fee_cache: Dict             = {}   # symbol -> {taker_fee_bps, maker_fee_bps}
+        self._fee_fail_ts: Dict          = {}   # symbol -> timestamp of last failed fee fetch
 
         self.api_key    = os.getenv("ASTER_API_KEY",    "")
         self.secret_key = os.getenv("ASTER_SECRET_KEY", "")
@@ -77,7 +79,7 @@ class AsterAPI:
         """Make a signed API request."""
         params                = params or {}
         params['timestamp']   = int(time.time() * 1000)
-        params['recvWindow']  = 5000
+        params['recvWindow']  = 10000
         params['signature']   = self._sign(params)
         url = f"{self.BASE_URL}{endpoint}"
         try:
@@ -85,9 +87,17 @@ class AsterAPI:
                 response = self.session.get(url, params=params, timeout=30)
             else:
                 response = self.session.post(url, data=params, timeout=30)
+            if response.status_code == 400:
+                try:
+                    body = response.json()
+                    log.warning("Aster: 400 for %s %s — code=%s msg=%s",
+                                method, endpoint, body.get('code'), body.get('msg'))
+                except Exception:
+                    log.warning("Aster: 400 for %s %s", method, endpoint)
+                return None
             response.raise_for_status()
             return response.json()
-        except Exception as e:
+        except Exception:
             log.exception("Aster API request failed")
             return None
 
@@ -103,6 +113,13 @@ class AsterAPI:
             fees = self.fee_cache[symbol]
             return (fees.get('taker_fee_bps'), fees.get('maker_fee_bps'))
 
+        # Short-lived failure cache: NYSE stock symbols on Aster return 400
+        # outside trading hours. Don't spam the API, but do retry after TTL
+        # so the fee is picked up once the market opens.
+        fail_ts = self._fee_fail_ts.get(symbol)
+        if fail_ts and (time.time() - fail_ts) < self.FEE_FAIL_TTL:
+            return (None, None)
+
         if not self.api_key or not self.secret_key:
             log.warning("Aster API credentials not configured in .env")
             return (None, None)
@@ -110,6 +127,7 @@ class AsterAPI:
         try:
             response = self._signed_request('GET', '/commissionRate', {'symbol': symbol})
             if not response:
+                self._fee_fail_ts[symbol] = time.time()
                 return (None, None)
 
             maker_rate = float(response.get('makerCommissionRate', 0))
@@ -121,7 +139,7 @@ class AsterAPI:
 
             self.fee_cache[symbol] = {'taker_fee_bps': taker_bps, 'maker_fee_bps': maker_bps}
             return (taker_bps, maker_bps)
-        except Exception as e:
+        except Exception:
             log.exception("Error fetching Aster fees for %s", symbol)
             return (None, None)
 
@@ -148,7 +166,7 @@ class AsterAPI:
                         self.leverage_cache[symbol]        = max_lev
                         self.leverage_cache_loaded[symbol] = True
                         return max_lev
-        except Exception as e:
+        except Exception:
             log.exception("Error fetching Aster max leverage for %s", symbol)
 
         self.leverage_cache_loaded[symbol] = True
@@ -190,7 +208,7 @@ class AsterAPI:
                     'holding_fee_1h_pct':  round(holding_1h_pct, 6),
                     'holding_fee_24h_pct': holding_24h_pct,
                 }
-        except Exception as e:
+        except Exception:
             log.exception("Aster holding fee error for %s", symbol)
         return {'holding_fee_1h_pct': 0.0, 'holding_fee_24h_pct': 0.0}
 
@@ -211,6 +229,7 @@ class AsterAPI:
             asks = [{'price': float(l[0]), 'qty': float(l[1])} for l in data['asks']]
             return {'bids': bids, 'asks': asks}
         except Exception:
+            log.exception("Aster get_orderbook error for symbol=%s", symbol)
             return None
 
     def normalize_orderbook(self, orderbook: Dict) -> Optional[StandardizedOrderbook]:
@@ -247,11 +266,12 @@ class AsterAPI:
             return None
 
         taker_fee_bps, maker_fee_bps = self.get_fees(symbol) if symbol else (None, None)
-        calc_fee = taker_fee_bps if taker_fee_bps is not None else 0.0
+        if taker_fee_bps is None:
+            return None
 
         result = ExecutionCalculator.calculate_execution_cost(
             std_orderbook, order_size_usd,
-            open_fee_bps=calc_fee,
+            open_fee_bps=taker_fee_bps,
             close_fee_bps=0.0,
         )
 

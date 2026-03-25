@@ -23,9 +23,11 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from typing import Dict, Optional, Tuple
 
+import httpx
 import requests
 from dotenv import load_dotenv
 
@@ -60,6 +62,15 @@ class GRVTAPI:
 
         self._load_instrument_meta()
         self._authenticate_and_load_fees()
+        if self._taker_fee_bps is None:
+            self._start_auth_retry()
+
+    @property
+    def is_ready(self) -> bool:
+        """True once fees are loaded, or if no API key is configured (intentionally disabled)."""
+        if not os.environ.get('GRVT_API_KEY'):
+            return True
+        return self._taker_fee_bps is not None
 
     # ------------------------------------------------------------------
     # Startup: instrument meta + auth + fees
@@ -77,59 +88,70 @@ class GRVTAPI:
             return
 
         try:
-            resp = self.session.post(
-                self.AUTH_URL,
-                json={"api_key": api_key},
-                headers={"Cookie": "rm=true;"},
-                timeout=15,
-            )
+            with httpx.Client(timeout=15) as client:
+                resp = client.post(
+                    self.AUTH_URL,
+                    json={"api_key": api_key},
+                    headers={"Cookie": "rm=true;"},
+                )
 
-            # Use resp.cookies to get the gravity token
-            gravity_token = resp.cookies.get("gravity")
-            if not gravity_token:
-                # Fallback: parse raw Set-Cookie header to get the gravity token
-                for header, value in resp.headers.items():
-                    if header.lower() == "set-cookie" and "gravity=" in value:
-                        part = next(
-                            (p for p in value.split(";") if p.strip().startswith("gravity=")),
-                            None,
-                        )
-                        if part:
-                            gravity_token = part.strip().split("=", 1)[1]
-                        break
+                gravity_token = resp.cookies.get("gravity")
+                if not gravity_token:
+                    for header, value in resp.headers.items():
+                        if header.lower() == "set-cookie" and "gravity=" in value:
+                            part = next(
+                                (p for p in value.split(";") if p.strip().startswith("gravity=")),
+                                None,
+                            )
+                            if part:
+                                gravity_token = part.strip().split("=", 1)[1]
+                            break
 
-            account_id = resp.headers.get("x-grvt-account-id") or resp.headers.get("X-Grvt-Account-Id")
+                account_id = resp.headers.get("x-grvt-account-id") or resp.headers.get("X-Grvt-Account-Id")
 
-            if not gravity_token or not account_id:
-                print(f"GRVT auth failed: gravity={gravity_token!r} account_id={account_id!r}")
-                return
+                if not gravity_token or not account_id:
+                    log.warning("GRVT auth failed: gravity=%r account_id=%r", gravity_token, account_id)
+                    return
 
-            self._account_id = account_id
-            cookie_header = f"gravity={gravity_token}"
+                self._account_id = account_id
 
-            fee_resp = self.session.post(
-                f"{self.TRADES_URL}/funding_account_summary",
-                json={},
-                headers={
-                    "Cookie":            cookie_header,
-                    "X-Grvt-Account-Id": account_id,
-                },
-                timeout=15,
-            )
-            if fee_resp.status_code != 200:
-                return
+                fee_resp = client.post(
+                    f"{self.TRADES_URL}/funding_account_summary",
+                    json={},
+                    headers={
+                        "Cookie":            f"gravity={gravity_token}",
+                        "X-Grvt-Account-Id": account_id,
+                    },
+                )
+                if fee_resp.status_code != 200:
+                    return
 
-            tier = fee_resp.json().get("t", {})
-            ft = tier.get("ft")
-            fm = tier.get("fm")
+                tier = fee_resp.json().get("t", {})
+                ft = tier.get("ft")
+                fm = tier.get("fm")
 
-            if ft is not None:
-                self._taker_fee_bps = float(ft) / 100
-            if fm is not None:
-                self._maker_fee_bps = float(fm) / 100
+                if ft is not None:
+                    self._taker_fee_bps = float(ft) / 100
+                if fm is not None:
+                    self._maker_fee_bps = float(fm) / 100
 
-        except Exception as e:
+        except Exception:
             log.exception("GRVT fee auth error")
+
+    def _start_auth_retry(self) -> None:
+        """Retry authentication in a background thread after startup failure."""
+        def _retry():
+            for delay in [5, 15, 30, 60]:
+                time.sleep(delay)
+                self._authenticate_and_load_fees()
+                if self._taker_fee_bps is not None:
+                    log.info("GRVT auth succeeded on retry (delay=%ds)", delay)
+                    return
+            log.warning("GRVT auth failed after all retries — GRVT results will be skipped")
+
+        t = threading.Thread(target=_retry, daemon=True, name="grvt-auth-retry")
+        t.start()
+        log.info("GRVT auth retry scheduled in background")
 
     def _load_instrument_meta(self) -> None:
         """Load funding_interval_hours for all active perpetuals at startup."""
@@ -147,7 +169,7 @@ class GRVTAPI:
                     self._instrument_meta[name] = {
                         'funding_interval_hours': inst.get('funding_interval_hours', 8),
                     }
-        except Exception as e:
+        except Exception:
             log.exception("GRVT instrument meta load error")
 
     # ------------------------------------------------------------------
@@ -182,7 +204,7 @@ class GRVTAPI:
             lev = float(brackets[0].get('max_leverage', 0)) if brackets else None
             self._leverage_cache[instrument] = lev or None
             return self._leverage_cache[instrument]
-        except Exception as e:
+        except Exception:
             log.exception("GRVT max leverage error for %s", instrument)
             self._leverage_cache[instrument] = None
             return None
@@ -216,7 +238,7 @@ class GRVTAPI:
                 or self._instrument_meta.get(instrument, {}).get('funding_interval_hours', 8)
             )
             return rate_pct * (24.0 / interval_hours)
-        except Exception as e:
+        except Exception:
             log.exception("GRVT funding rate error for %s", instrument)
             return None
 
@@ -260,7 +282,7 @@ class GRVTAPI:
                 mid_price=mid,
                 timestamp=time.time(),
             )
-        except Exception as e:
+        except Exception:
             log.exception("GRVT orderbook error for %s", instrument)
             return None
 
@@ -284,13 +306,13 @@ class GRVTAPI:
         For a short: opening = sell slippage, closing = buy slippage.
         """
         if self._taker_fee_bps is None:
-            self._authenticate_and_load_fees()
+            return None
 
         ob = self.get_orderbook(instrument)
         if not ob:
             return None
 
-        taker_fee = self._taker_fee_bps or 0.0
+        taker_fee = self._taker_fee_bps
 
         result = ExecutionCalculator.calculate_execution_cost(
             ob, order_size_usd, taker_fee, taker_fee

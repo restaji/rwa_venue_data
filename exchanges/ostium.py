@@ -193,7 +193,7 @@ class OstiumAPI:
                             }
                     # blocks_per_day is fetched live via Arbitrum RPC in get_rollover_rate_24h
 
-        except Exception as e:
+        except Exception:
             log.exception("Error loading Ostium metadata from pairs API")
 
         # 2. Load Seasons (Fee Overrides)
@@ -216,7 +216,7 @@ class OstiumAPI:
                                 new_fee_bps = float(new_fee) * 100.0
                                 cache[symbol]['fee_bps']       = new_fee_bps
                                 cache[symbol]['maker_fee_bps'] = new_fee_bps
-        except Exception as e:
+        except Exception:
             log.exception("Error loading Ostium seasons data")
 
         return cache
@@ -385,7 +385,7 @@ class OstiumAPI:
                     data = response.json()
                     if data and data.get('mid', 0) > 0:
                         return data
-            except Exception as e:
+            except Exception:
                 if attempt < max_retries - 1:
                     time.sleep(1)
                 else:

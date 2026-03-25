@@ -78,7 +78,7 @@ class EdgeXAPI:
                     'max_leverage':  max_lev,
                     'contract_name': c.get('contractName', ''),
                 }
-        except Exception as e:
+        except Exception:
             log.exception("EdgeX meta cache load error")
 
     def get_fees(self, contract_id: int) -> Tuple[Optional[float], Optional[float]]:
@@ -115,7 +115,7 @@ class EdgeXAPI:
                 return None
             rate_4h = float(rows[0].get('fundingRate', 0))
             return rate_4h * self.FUNDING_INTERVALS_PER_DAY * 100  # as %
-        except Exception as e:
+        except Exception:
             log.exception("EdgeX funding rate error for contractId=%s", contract_id)
             return None
 
@@ -161,7 +161,7 @@ class EdgeXAPI:
                 mid_price=mid,
                 timestamp=time.time(),
             )
-        except Exception as e:
+        except Exception:
             log.exception("EdgeX orderbook error for contractId=%s", contract_id)
             return None
 
@@ -190,8 +190,11 @@ class EdgeXAPI:
             return None
 
         taker_fee_bps, maker_fee_bps = self.get_fees(contract_id)
+        if taker_fee_bps is None:
+            return None
+
         max_lev = self.get_max_leverage(contract_id)
-        result  = ExecutionCalculator.calculate_execution_cost(ob, order_size_usd, taker_fee_bps or 0.0, taker_fee_bps or 0.0)
+        result  = ExecutionCalculator.calculate_execution_cost(ob, order_size_usd, taker_fee_bps, taker_fee_bps)
 
         if not result:
             return None
@@ -213,7 +216,7 @@ class EdgeXAPI:
         result['opening_slippage_bps'] = buy_slip_bps  if is_long else sell_slip_bps
         result['closing_slippage_bps'] = sell_slip_bps if is_long else buy_slip_bps
         result['slippage_type']        = 'opening_closing'
-        result['total_cost_bps']       = buy_slip_bps + sell_slip_bps + (taker_fee_bps or 0.0) * 2
+        result['total_cost_bps']       = buy_slip_bps + sell_slip_bps + taker_fee_bps * 2
         result['symbol']               = symbol
 
         funding_24h = self.get_funding_rate_24h(contract_id)

@@ -56,7 +56,7 @@ class LighterAPI:
                             'min_initial_margin_fraction': float(min_margin) if min_margin else None,
                         }
                 self.market_cache_loaded = True
-        except Exception as e:
+        except Exception:
             log.exception("Error loading Lighter market cache")
 
     def _market_key(self, market_id: Optional[int]) -> Optional[int]:
@@ -108,7 +108,7 @@ class LighterAPI:
                         key = int(mid) if isinstance(mid, (int, float)) else mid
                         self.funding_cache[key] = float(rate)
                 self._last_funding_fetch = now
-        except Exception as e:
+        except Exception:
             log.exception("Error fetching Lighter funding rates")
 
     def get_holding_fee(self, market_id: int) -> Dict:
@@ -138,6 +138,7 @@ class LighterAPI:
             response.raise_for_status()
             return response.json()
         except Exception:
+            log.exception("Lighter get_orderbook error for market_id=%s", market_id)
             return None
 
     def normalize_orderbook(self, orderbook: Dict) -> Optional[StandardizedOrderbook]:
@@ -178,12 +179,13 @@ class LighterAPI:
             return None
 
         taker_fee_bps, maker_fee_bps = self.get_fees(market_id)
-        calc_fee = taker_fee_bps if taker_fee_bps is not None else 0.0
+        if taker_fee_bps is None:
+            return None
 
         result = ExecutionCalculator.calculate_execution_cost(
             std_orderbook, order_size_usd,
-            open_fee_bps=calc_fee,
-            close_fee_bps=calc_fee,
+            open_fee_bps=taker_fee_bps,
+            close_fee_bps=taker_fee_bps,
         )
 
         if result:
