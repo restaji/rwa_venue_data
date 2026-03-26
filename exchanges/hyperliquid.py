@@ -218,38 +218,10 @@ class HyperliquidAPI:
             return self.max_leverages_cache.get(key)
         return self.max_leverages_cache.get(f"xyz:{symbol}")
 
-    # ------------------------------------------------------------------
-    # Funding fee
-    # ------------------------------------------------------------------
     def _resolve_xyz_name(self, symbol: str) -> str:
         """Map common RWA ticker to xyz dex internal name."""
         upper = symbol.upper().replace("XYZ:", "")
         return self._symbol_aliases.get(upper, upper)
-
-    def get_holding_fee(self, symbol: str) -> Dict:
-        """
-        Return 1H and 24H holding fee for *symbol* as % of notional.
-        `funding` from the API is a 1H rate as a plain fraction (e.g. 0.0000142).
-        Positive = longs pay shorts; negative = shorts pay longs.
-        """
-        self._fetch_metadata()
-        if self._is_flx_symbol(symbol):
-            key = self._resolve_flx_coin(symbol)
-            plain = key.replace("flx:", "")
-            funding_1h_raw = self.funding_cache.get(key) or self.funding_cache.get(plain) or 0.0
-        else:
-            xyz_name = self._resolve_xyz_name(symbol)
-            funding_1h_raw = (
-                self.funding_cache.get(f"xyz:{xyz_name}")
-                or self.funding_cache.get(xyz_name)
-                or 0.0
-            )
-        holding_1h_pct  = funding_1h_raw * 100
-        holding_24h_pct = math.floor(holding_1h_pct * 24 * 1_000_000) / 1_000_000
-        return {
-            'holding_fee_1h_pct':  round(holding_1h_pct, 6),
-            'holding_fee_24h_pct': holding_24h_pct,
-        }
 
     # ------------------------------------------------------------------
     # Orderbook
@@ -470,7 +442,5 @@ class HyperliquidAPI:
             final_result['symbol']       = display_symbol
             final_result['max_leverage'] = self.get_max_leverage(symbol)
             final_result['true_mid']     = true_mid
-            holding                      = self.get_holding_fee(symbol)
-            final_result.update(holding)
 
         return final_result

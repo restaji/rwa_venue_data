@@ -171,11 +171,11 @@ class FeeComparator:
                 'lighter':      config.symbol_key if config.lighter_market_id else None,
                 'aster':        config.aster_symbol,
                 'avantis':      config.symbol_key,
-                'avantis_x':    config.symbol_key,
+                'avantis_x':    config.avantis_x_instrument,
                 'ostium':       config.ostium_symbol,
                 'extended':     config.extended_symbol,
                 'edgex':        (config.edgex_symbol or config.symbol_key) if config.edgex_contract_id else None,
-                'grvt':         config.symbol_key if config.grvt_instrument else None,
+                'grvt':         config.grvt_instrument,
             },
         }
 
@@ -217,7 +217,10 @@ class FeeComparator:
             return 'avantis', r
 
         def fetch_avantis_x():
-            r = self.avantis_x.calculate_cost(asset_key, order_size_usd, is_long=is_long)
+            r = self.avantis_x.calculate_cost(
+                asset_key, order_size_usd, is_long=is_long,
+                instrument_name=config.avantis_x_instrument,
+            )
             return 'avantis_x', r
 
         def fetch_ostium():
@@ -247,7 +250,7 @@ class FeeComparator:
         def fetch_grvt():
             if not config.grvt_instrument:
                 return 'grvt', None
-            r = self.grvt.calculate_execution_cost(config.grvt_instrument, order_size_usd, direction=direction, symbol=config.symbol_key)
+            r = self.grvt.calculate_execution_cost(config.grvt_instrument, order_size_usd, direction=direction, symbol=config.grvt_instrument)
             return 'grvt', r
 
         tasks = [fetch_hyperliquid, fetch_lighter, fetch_aster, fetch_avantis,

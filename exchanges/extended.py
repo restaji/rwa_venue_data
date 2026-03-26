@@ -102,32 +102,6 @@ class ExtendedAPI:
         return self.market_cache.get(market, {}).get('max_leverage')
 
     # ------------------------------------------------------------------
-    # Funding fee
-    # ------------------------------------------------------------------
-    def get_holding_fee(self, market: str) -> Dict:
-        """
-        Fetch current holding fee for *market* from the public /stats endpoint.
-        `fundingRate` is the 1H rate as a plain fraction (e.g. -0.000007).
-        Positive = longs pay shorts; negative = shorts pay longs.
-        """
-        try:
-            url  = f"{self.BASE_URL}/info/markets/{market}/stats"
-            resp = requests.get(url, timeout=15)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get('status') == 'OK':
-                    rate_1h_raw     = float(data.get('data', {}).get('fundingRate', 0) or 0)
-                    holding_1h_pct  = rate_1h_raw * 100
-                    holding_24h_pct = math.floor(holding_1h_pct * 24 * 1_000_000) / 1_000_000
-                    return {
-                        'holding_fee_1h_pct':  round(holding_1h_pct, 6),
-                        'holding_fee_24h_pct': holding_24h_pct,
-                    }
-        except Exception:
-            log.exception("Extended holding fee error for %s", market)
-        return {'holding_fee_1h_pct': 0.0, 'holding_fee_24h_pct': 0.0}
-
-    # ------------------------------------------------------------------
     # Orderbook
     # ------------------------------------------------------------------
     def get_orderbook(self, market: str) -> Optional[Dict]:
@@ -188,7 +162,5 @@ class ExtendedAPI:
             result['fee_bps']       = taker_bps
             result['maker_fee_bps'] = maker_bps
             result['max_leverage']  = self.get_max_leverage(market)
-            holding = self.get_holding_fee(market)
-            result.update(holding)
 
         return result

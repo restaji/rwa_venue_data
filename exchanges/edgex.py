@@ -28,12 +28,8 @@ class EdgeXAPI:
     """Client for EdgeX exchange orderbook and fee data."""
 
     BASE_URL    = "https://pro.edgex.exchange/api/v1/public"
-    FUNDING_URL = f"{BASE_URL}/funding/getFundingRatePage"
     DEPTH_URL   = f"{BASE_URL}/quote/getDepth"
     META_URL    = f"{BASE_URL}/meta/getMetaData"
-
-    # Funding is 4H interval — multiply by 6 to get 24H
-    FUNDING_INTERVALS_PER_DAY = 6
 
     def __init__(self):
         self.session = requests.Session()
@@ -89,35 +85,6 @@ class EdgeXAPI:
     def get_max_leverage(self, contract_id: int) -> Optional[float]:
         """Return tier-1 max leverage for a contract."""
         return self.meta_cache.get(str(contract_id), {}).get('max_leverage')
-
-    # ------------------------------------------------------------------
-    # Funding rate
-    # ------------------------------------------------------------------
-    def get_funding_rate_24h(self, contract_id: int) -> Optional[float]:
-        """
-        Return the 24H funding rate as a percentage of notional.
-        Fetches the latest 4H settlement rate and multiplies by 6.
-        """
-        try:
-            params = {
-                'filterSettlementFundingRate': 'true',
-                'contractId': contract_id,
-                'size': 1,
-            }
-            resp = self.session.get(self.FUNDING_URL, params=params, timeout=15)
-            if resp.status_code != 200:
-                return None
-            data = resp.json()
-            if data.get('code') != 'SUCCESS':
-                return None
-            rows = data.get('data', {}).get('dataList', [])
-            if not rows:
-                return None
-            rate_4h = float(rows[0].get('fundingRate', 0))
-            return rate_4h * self.FUNDING_INTERVALS_PER_DAY * 100  # as %
-        except Exception:
-            log.exception("EdgeX funding rate error for contractId=%s", contract_id)
-            return None
 
     # ------------------------------------------------------------------
     # Orderbook
@@ -217,14 +184,7 @@ class EdgeXAPI:
         result['closing_slippage_bps'] = sell_slip_bps if is_long else buy_slip_bps
         result['slippage_type']        = 'opening_closing'
         result['total_cost_bps']       = buy_slip_bps + sell_slip_bps + taker_fee_bps * 2
-        result['symbol']               = symbol
-
-        funding_24h = self.get_funding_rate_24h(contract_id)
-
-        result['max_leverage']              = max_lev
-        result['maker_fee_bps']             = maker_fee_bps
-        result['funding_rate_4h_pct']       = (funding_24h / 6) if funding_24h is not None else None
-        result['funding_rate_24h_pct']      = funding_24h
-        result['holding_fee_24h_long_pct']  = funding_24h
-        result['holding_fee_24h_short_pct'] = (-funding_24h if funding_24h is not None else None)
+        result['symbol']       = symbol
+        result['max_leverage'] = max_lev
+        result['maker_fee_bps'] = maker_fee_bps
         return result

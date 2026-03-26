@@ -26,19 +26,10 @@ log = logging.getLogger(__name__)
 class AvantisXAPI:
     """Size-adjusted LMAX spread combined with Avantis opening / closing fees. (AvantisX)"""
 
-    # Asset key → name fragment used to look up lmax_instruments (case-insensitive LIKE)
-    LMAX_INSTRUMENTS: Dict[str, str] = {
-        "XAU":    "Gold (Spot)",
-        "XAG":    "Silver (Spot)",
-        "EURUSD": "EUR/USD",
-        "GBPUSD": "GBP/USD",
-        "USDJPY": "USD/JPY",
-    }
-
     def __init__(self, avantis: Optional[AvantisAPI] = None):
         self._avantis = avantis or AvantisAPI()
         self._local = threading.local()
-        self._instrument_cache: Dict[str, Dict] = {}
+        self._instrument_cache: Dict[str, Dict] = {}  # instrument_name -> row
 
     # ------------------------------------------------------------------
     # ClickHouse helpers
@@ -65,36 +56,32 @@ class AvantisXAPI:
     # Instrument resolution
     # ------------------------------------------------------------------
 
-    def _resolve_instrument(self, asset_key: str) -> Optional[Dict]:
-        """Return lmax_instruments row for asset_key, cached after first lookup."""
-        if asset_key in self._instrument_cache:
-            return self._instrument_cache[asset_key]
-
-        fragment = self.LMAX_INSTRUMENTS.get(asset_key.upper())
-        if not fragment:
-            return None
+    def _resolve_instrument(self, instrument_name: str) -> Optional[Dict]:
+        """Return lmax_instruments row for the given LMAX name, cached after first lookup."""
+        if instrument_name in self._instrument_cache:
+            return self._instrument_cache[instrument_name]
 
         try:
             rows = self._query(
                 """
                 SELECT id, name, symbol, contract_size
                 FROM market_data.lmax_instruments
-                WHERE name   = %(frag)s
-                   OR symbol = %(frag)s
+                WHERE name   = %(name)s
+                   OR symbol = %(name)s
                 LIMIT 1
                 """,
-                {"frag": fragment},
+                {"name": instrument_name},
             )
         except Exception:
-            log.exception("ClickHouse instrument lookup failed for %s", asset_key)
+            log.exception("ClickHouse instrument lookup failed for %r", instrument_name)
             return None
 
         if not rows:
-            log.warning("LMAX: no instrument found for %s (name=%r)", asset_key, fragment)
+            log.warning("LMAX: no instrument found for name=%r", instrument_name)
             return None
 
         inst = rows[0]
-        self._instrument_cache[asset_key] = inst
+        self._instrument_cache[instrument_name] = inst
         return inst
 
     # ------------------------------------------------------------------
@@ -211,15 +198,22 @@ class AvantisXAPI:
         asset_key: str,
         order_size_usd: float,
         is_long: bool = True,
+        instrument_name: Optional[str] = None,
     ) -> Optional[Dict]:
         """
         Calculate total execution cost using LMAX spread + Avantis fees.
 
+        instrument_name is the LMAX name from AssetConfig.avantis_x_instrument
+        (e.g. "Gold (Spot)").  Returns None if the instrument is not supported.
+
         Returns the same shape as AvantisAPI.calculate_cost() so it slots
         straight into the FeeComparator without special-casing.
         """
+        if not instrument_name:
+            return None
+
         # 1. Resolve LMAX instrument
-        inst = self._resolve_instrument(asset_key)
+        inst = self._resolve_instrument(instrument_name)
         if inst is None:
             return None
 
@@ -261,21 +255,11 @@ class AvantisXAPI:
             open_fee_bps  = self._avantis._calculate_opening_fee(pair_info, order_size_usd, is_long=is_long)
             close_fee_bps = pair_info.get("closeFeeP", 0) * 100
 
-            margin_fee            = pair_info.get("marginFee", {})
-            holding_1h_long_pct   = margin_fee.get("long",  0)
-            holding_1h_short_pct  = margin_fee.get("short", 0)
-            holding_24h_long_pct  = math.floor(holding_1h_long_pct  * 24 * 1_000_000) / 1_000_000
-            holding_24h_short_pct = math.floor(holding_1h_short_pct * 24 * 1_000_000) / 1_000_000
-
             max_wallet_oi = pair_info.get("maxWalletOI", float("inf"))
             max_lev       = pair_info.get("leverages", {}).get("maxLeverage")
         else:
             open_fee_bps  = 0.0
             close_fee_bps = 0.0
-            holding_1h_long_pct   = 0.0
-            holding_1h_short_pct  = 0.0
-            holding_24h_long_pct  = 0.0
-            holding_24h_short_pct = 0.0
             max_wallet_oi = float("inf")
             max_lev       = None
 
@@ -323,9 +307,5 @@ class AvantisXAPI:
                 "slippage_bps":         sell_slip,
                 "total_book_notional":  sell_impact["total_book_notional"],
             },
-            "holding_fee_1h_long_pct":   round(holding_1h_long_pct,   6),
-            "holding_fee_1h_short_pct":  round(holding_1h_short_pct,  6),   
-            "holding_fee_24h_long_pct":  holding_24h_long_pct,
-            "holding_fee_24h_short_pct": holding_24h_short_pct,
             "timestamp": time.time(),
         }

@@ -276,36 +276,6 @@ class OstiumAPI:
         self._blocks_per_day = 345_600  # fallback ~4 blk/s
         return self._blocks_per_day
 
-    def get_rollover_rate_24h(self, ostium_symbol: str, is_long: bool = True) -> float:
-        """
-        Return the 24 h rollover (funding) fee as a percentage of notional,
-        using `rolloverFeePerBlock` from the API and the live Arbitrum block rate.
-
-        Positive  → position PAYS that % per day.
-        Negative  → position RECEIVES (earns) that % per day.
-        """
-        data = self.metadata_cache.get(ostium_symbol)
-        if not data:
-            return 0.0
-
-        rollover_fee_per_block       = data.get('rollover_fee_per_block', 0)
-        is_negative_rollover_allowed = data.get('is_negative_rollover_allowed', False)
-        blocks_per_day               = self._fetch_blocks_per_day()
-
-        long_rate_pct = rollover_fee_per_block * blocks_per_day / self.PRECISION_18 * 100
-
-        if is_long:
-            return long_rate_pct
-        else:
-            short_rate_pct = -long_rate_pct
-            if not is_negative_rollover_allowed:
-                short_rate_pct = max(0.0, short_rate_pct)
-            return short_rate_pct
-
-    def get_rollover_rate_1h(self, ostium_symbol: str, is_long: bool = True) -> float:
-        """Return the 1 h rollover rate (% of notional). Divide 24 h rate by 24."""
-        return self.get_rollover_rate_24h(ostium_symbol, is_long) / 24
-
     # ------------------------------------------------------------------
     # Dynamic spread helpers  (Solidity-compatible Pade approximation)
     # ------------------------------------------------------------------
@@ -489,10 +459,6 @@ class OstiumAPI:
         buy_exec_price  = mid_price * (1 + buy_spread_bps  / 10000)
         sell_exec_price = mid_price * (1 - sell_spread_bps / 10000)
 
-        # Rollover (margin) fee rates
-        rollover_long_24h  = self.get_rollover_rate_24h(asset, is_long=True)
-        rollover_short_24h = self.get_rollover_rate_24h(asset, is_long=False)
-
         return {
             'mid_price':               mid_price,
             'best_bid':                bid_price,
@@ -506,17 +472,6 @@ class OstiumAPI:
             'max_leverage':            asset_data.get('max_leverage'),
             'is_dynamic_spread':       is_dynamic,
             'timestamp':               time.time(),
-            # Rollover / margin fee  (% of notional per period)
-            # Positive = position pays; Negative = position receives
-            'rollover_long_rate_24h':    rollover_long_24h,   # % per 24 h for longs
-            'rollover_short_rate_24h':   rollover_short_24h,  # % per 24 h for shorts
-            'rollover_long_rate_1h':     rollover_long_24h  / 24,
-            'rollover_short_rate_1h':    rollover_short_24h / 24,
-            # Holding fee as plain percentage (% of notional)
-            'holding_fee_1h_long_pct':   round(rollover_long_24h  / 24, 6),
-            'holding_fee_1h_short_pct':  round(rollover_short_24h / 24, 6),
-            'holding_fee_24h_long_pct':  math.floor(rollover_long_24h  * 1_000_000) / 1_000_000,
-            'holding_fee_24h_short_pct': math.floor(rollover_short_24h * 1_000_000) / 1_000_000,
             'buy':  {'avg_price': buy_exec_price,  'slippage_bps': buy_spread_bps,  'levels_used': 1},
             'sell': {'avg_price': sell_exec_price, 'slippage_bps': sell_spread_bps, 'levels_used': 1},
         }

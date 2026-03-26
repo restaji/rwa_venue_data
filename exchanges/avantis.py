@@ -21,12 +21,12 @@ log = logging.getLogger(__name__)
 class AvantisAPI:
     """Dynamic fee and spread calculation for Avantis."""
 
-    SOCKET_API   = "https://socket-api-pub.avantisfi.com/socket-api/v1/data"
-    RISK_API     = "https://risk-api.avantisfi.com/spread/dynamic"
+    SOCKET_API   = "https://socket-api-pub.avantisfi.com/socket-api/v1/data?override=true"
+    RISK_API     = "https://risk-api.avantisfi.com/v1/dynamic-spread"
     DUMMY_TRADER = "0x1234567890123456789012345678901234567890"
 
     PAIRS = {
-        "XAU": 21, "XAG": 20, "WTI": 65,  
+        "XAU": 21, "XAG": 20, "WTI": 96, "BRENT": 97,  
         "EURUSD": 11, "GBPUSD": 13, "USDJPY": 12,
         "SPY": 78, "QQQ": 79,
         "NVDA": 81, "TSLA": 86, "AAPL": 82, "MSFT": 84,
@@ -79,26 +79,42 @@ class AvantisAPI:
         return ((param1 * open_interest_pct + param2) / 10000) * 100
 
     def _fetch_dynamic_spread(self, pair_index: int, position_size: float, is_long: bool, is_pnl: bool) -> Optional[float]:
+        """
+        Fetch dynamic spread from Risk API v1.
+        Endpoint: GET /v1/dynamic-spread/{pairIndex}
+        Returns spread in bps.
+        """
+        url = f"{self.RISK_API}/{pair_index}"
         params = {
-            "pairIndex":        pair_index,
-            "positionSizeUsdc": int(position_size * (10 ** 18)),
-            "isLong":           str(is_long).lower(),
-            "isPnl":            str(is_pnl).lower(),
-            "trader":           self.DUMMY_TRADER,
+            "collateralUsdc": int(position_size),
+            "isLong":         str(is_long).lower(),
+            "leverage":       1,
+            "isPnl":          str(is_pnl).lower(),
+            "precision":      18,
+            "trader":         self.DUMMY_TRADER,
         }
         try:
-            data = requests.get(self.RISK_API, params=params, timeout=30).json()
-            return float(data.get("spreadP", 0)) / (10 ** 10) * 100
+            data = requests.get(url, params=params, timeout=30).json()
+            dynamic_spread = float(data.get("dynamicSpreadPct", 0))
+            return dynamic_spread / (10 ** 18) * 100
         except Exception:
+            log.exception("Avantis Risk API error for pair %s", pair_index)
             return None
 
     def _get_spread(self, pair_idx: str, pair_info: Dict, position_size: float, is_long: bool = True) -> float:
+        """
+        Get spread for a pair based on group's isSpreadDynamic flag.
+        - If isSpreadDynamic is True: fetch from Risk API
+        - If isSpreadDynamic is False: use static spreadP from socket data
+        """
         group_index = pair_info.get("groupIndex", 0)
-        group       = self._group_info.get(str(group_index), {})
+        group = self._group_info.get(str(group_index), {})
+        
         if group.get("isSpreadDynamic", False):
             spread = self._fetch_dynamic_spread(int(pair_idx), position_size, is_long, is_pnl=False)
             if spread is not None:
                 return spread
+        
         return pair_info.get("spreadP", 0) * 100
 
     def calculate_cost(self, asset_key: str, order_size_usd: float, is_long: bool = True) -> Optional[Dict]:
@@ -117,12 +133,6 @@ class AvantisAPI:
         close_fee_bps = pair_info.get("closeFeeP", 0) * 100
         spread_bps    = self._get_spread(pair_idx, pair_info, position_size, is_long=is_long)
         total_cost    = spread_bps + open_fee_bps + close_fee_bps
-
-        margin_fee            = pair_info.get("marginFee", {})
-        holding_1h_long_pct   = margin_fee.get("long",  0)
-        holding_1h_short_pct  = margin_fee.get("short", 0)
-        holding_24h_long_pct  = math.floor(holding_1h_long_pct  * 24 * 1_000_000) / 1_000_000
-        holding_24h_short_pct = math.floor(holding_1h_short_pct * 24 * 1_000_000) / 1_000_000
 
         leverages      = pair_info.get("leverages", {})
         storage_params = pair_info.get("storagePairParams", {})
@@ -150,9 +160,5 @@ class AvantisAPI:
             'max_wallet_oi':        max_wallet_oi,
             'buy':  {'filled': filled, 'filled_usd': filled_usd, 'unfilled_usd': unfilled_usd, 'levels_used': 1, 'slippage_bps': spread_bps},
             'sell': {'filled': filled, 'filled_usd': filled_usd, 'unfilled_usd': unfilled_usd, 'levels_used': 1, 'slippage_bps': 0.0},
-            'holding_fee_1h_long_pct':   round(holding_1h_long_pct,   6),
-            'holding_fee_1h_short_pct':  round(holding_1h_short_pct,  6),
-            'holding_fee_24h_long_pct':  holding_24h_long_pct,
-            'holding_fee_24h_short_pct': holding_24h_short_pct,
             'timestamp':                 time.time(),
         }

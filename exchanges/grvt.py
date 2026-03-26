@@ -27,7 +27,6 @@ import threading
 import time
 from typing import Dict, Optional, Tuple
 
-import httpx
 import requests
 from dotenv import load_dotenv
 
@@ -85,55 +84,60 @@ class GRVTAPI:
         """
         api_key = os.getenv("GRVT_API_KEY")
         if not api_key:
+            log.warning("GRVT_API_KEY not configured")
             return
 
         try:
-            with httpx.Client(timeout=15) as client:
-                resp = client.post(
-                    self.AUTH_URL,
-                    json={"api_key": api_key},
-                    headers={"Cookie": "rm=true;"},
-                )
+            resp = requests.post(
+                self.AUTH_URL,
+                json={"api_key": api_key},
+                headers={"Cookie": "rm=true;", "Content-Type": "application/json"},
+                timeout=15,
+            )
 
-                gravity_token = resp.cookies.get("gravity")
-                if not gravity_token:
-                    for header, value in resp.headers.items():
-                        if header.lower() == "set-cookie" and "gravity=" in value:
-                            part = next(
-                                (p for p in value.split(";") if p.strip().startswith("gravity=")),
-                                None,
-                            )
-                            if part:
-                                gravity_token = part.strip().split("=", 1)[1]
-                            break
+            gravity_token = resp.cookies.get("gravity")
+            if not gravity_token:
+                for header, value in resp.headers.items():
+                    if header.lower() == "set-cookie" and "gravity=" in value:
+                        part = next(
+                            (p for p in value.split(";") if p.strip().startswith("gravity=")),
+                            None,
+                        )
+                        if part:
+                            gravity_token = part.strip().split("=", 1)[1]
+                        break
 
-                account_id = resp.headers.get("x-grvt-account-id") or resp.headers.get("X-Grvt-Account-Id")
+            account_id = resp.headers.get("x-grvt-account-id") or resp.headers.get("X-Grvt-Account-Id")
 
-                if not gravity_token or not account_id:
-                    log.warning("GRVT auth failed: gravity=%r account_id=%r", gravity_token, account_id)
-                    return
+            if not gravity_token or not account_id:
+                log.warning("GRVT auth failed: gravity=%r account_id=%r status=%s", gravity_token, account_id, resp.status_code)
+                return
 
-                self._account_id = account_id
+            self._account_id = account_id
 
-                fee_resp = client.post(
-                    f"{self.TRADES_URL}/funding_account_summary",
-                    json={},
-                    headers={
-                        "Cookie":            f"gravity={gravity_token}",
-                        "X-Grvt-Account-Id": account_id,
-                    },
-                )
-                if fee_resp.status_code != 200:
-                    return
+            fee_resp = requests.post(
+                f"{self.TRADES_URL}/funding_account_summary",
+                json={},
+                headers={
+                    "Cookie":            f"gravity={gravity_token}",
+                    "X-Grvt-Account-Id": account_id,
+                    "Content-Type":      "application/json",
+                },
+                timeout=15,
+            )
+            if fee_resp.status_code != 200:
+                log.warning("GRVT fee fetch failed: status=%s", fee_resp.status_code)
+                return
 
-                tier = fee_resp.json().get("t", {})
-                ft = tier.get("ft")
-                fm = tier.get("fm")
+            tier = fee_resp.json().get("t", {})
+            ft = tier.get("ft")
+            fm = tier.get("fm")
 
-                if ft is not None:
-                    self._taker_fee_bps = float(ft) / 100
-                if fm is not None:
-                    self._maker_fee_bps = float(fm) / 100
+            if ft is not None:
+                self._taker_fee_bps = float(ft) / 100
+                log.info("GRVT fees loaded: taker=%.2f bps, maker=%.2f bps", self._taker_fee_bps, self._maker_fee_bps or 0)
+            if fm is not None:
+                self._maker_fee_bps = float(fm) / 100
 
         except Exception:
             log.exception("GRVT fee auth error")
@@ -207,39 +211,6 @@ class GRVTAPI:
         except Exception:
             log.exception("GRVT max leverage error for %s", instrument)
             self._leverage_cache[instrument] = None
-            return None
-
-    # ------------------------------------------------------------------
-    # Funding rate
-    # ------------------------------------------------------------------
-    def get_funding_rate_24h(self, instrument: str) -> Optional[float]:
-        """
-        Return the latest 24H funding rate as a percentage of notional.
-
-        Fetches the most recent settled period from /full/v1/funding and
-        scales by (24 / funding_interval_hours).  The raw value from the API
-        is already a percentage (e.g. 0.005 means 0.005% per interval).
-        """
-        try:
-            resp = self.session.post(
-                f"{self.BASE_URL}/funding",
-                json={"instrument": instrument},
-                timeout=15,
-            )
-            if resp.status_code != 200:
-                return None
-            rows = resp.json().get('result', [])
-            if not rows:
-                return None
-            latest = rows[0]
-            rate_pct = float(latest.get('funding_rate', 0))
-            interval_hours = float(
-                latest.get('funding_interval_hours')
-                or self._instrument_meta.get(instrument, {}).get('funding_interval_hours', 8)
-            )
-            return rate_pct * (24.0 / interval_hours)
-        except Exception:
-            log.exception("GRVT funding rate error for %s", instrument)
             return None
 
     # ------------------------------------------------------------------
@@ -339,13 +310,7 @@ class GRVTAPI:
         result['total_cost_bps']       = buy_slip_bps + sell_slip_bps + taker_fee * 2
         result['symbol']               = symbol or instrument
 
-        max_lev     = self.get_max_leverage(instrument)
-        funding_24h = self.get_funding_rate_24h(instrument)
-
-        result['max_leverage']              = max_lev
-        result['taker_fee_bps']             = self._taker_fee_bps
-        result['maker_fee_bps']             = self._maker_fee_bps
-        result['funding_rate_24h_pct']      = funding_24h
-        result['holding_fee_24h_long_pct']  = funding_24h
-        result['holding_fee_24h_short_pct'] = (-funding_24h if funding_24h is not None else None)
+        result['max_leverage']  = self.get_max_leverage(instrument)
+        result['taker_fee_bps'] = self._taker_fee_bps
+        result['maker_fee_bps'] = self._maker_fee_bps
         return result

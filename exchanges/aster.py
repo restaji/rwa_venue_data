@@ -27,12 +27,11 @@ class AsterAPI:
     BASE_URL     = "https://fapi.asterdex.com/fapi/v1"
     LEVERAGE_API = "https://www.asterdex.com/bapi/futures/v1/public/future/common/symbol/leverageoi/remaining"
     SYMBOLS_API  = "https://www.asterdex.com/bapi/futures/v1/public/future/simple/symbols"
-    FUNDING_API  = "https://www.asterdex.com/bapi/futures/v1/public/future/common/real-time-funding-rate"
-
     # Map short tickers -> Aster symbol names
     SYMBOL_MAP: Dict[str, str] = {
         "XAG":    "XAGUSDT",
         "XAU":    "XAUUSDT",
+        "WTI":    "CLUSDT",
         "EURUSD": "EURUSDUSDT",
         "USDJPY": "USDTJPYUSDT",
         "GBPUSD": "GBPUSDUSDT",
@@ -180,38 +179,6 @@ class AsterAPI:
     # ------------------------------------------------------------------
     # Funding fee
     # ------------------------------------------------------------------
-    def _resolve_symbol(self, symbol: str) -> str:
-        """Map short ticker (e.g. 'XAG') to Aster full symbol (e.g. 'XAGUSDT')."""
-        return self.SYMBOL_MAP.get(symbol.upper(), symbol)
-
-    def get_holding_fee(self, symbol: str) -> Dict:
-        """
-        Fetch current holding fee for *symbol* from the real-time-funding-rate API.
-        `lastFundingRate` is the 4H rate as a plain fraction (e.g. -0.00027586).
-        Positive = longs pay shorts; negative = shorts pay longs.
-        """
-        try:
-            resp = requests.get(
-                self.FUNDING_API,
-                params={'symbol': self._resolve_symbol(symbol)},
-                headers=self.headers,
-                timeout=15,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                entry = (data.get('data') or [{}])[0]
-                rate_4h_raw     = float(entry.get('lastFundingRate', 0) or 0)
-                holding_4h_pct  = rate_4h_raw * 100
-                holding_1h_pct  = holding_4h_pct / 4
-                holding_24h_pct = math.floor(holding_4h_pct * 6 * 1_000_000) / 1_000_000
-                return {
-                    'holding_fee_1h_pct':  round(holding_1h_pct, 6),
-                    'holding_fee_24h_pct': holding_24h_pct,
-                }
-        except Exception:
-            log.exception("Aster holding fee error for %s", symbol)
-        return {'holding_fee_1h_pct': 0.0, 'holding_fee_24h_pct': 0.0}
-
     # ------------------------------------------------------------------
     # Orderbook
     # ------------------------------------------------------------------
@@ -280,7 +247,5 @@ class AsterAPI:
             result['maker_fee_bps'] = maker_fee_bps
             if symbol:
                 result['max_leverage'] = self.get_max_leverage(symbol)
-                holding = self.get_holding_fee(symbol)
-                result.update(holding)
 
         return result

@@ -25,9 +25,6 @@ class LighterAPI:
         self.headers            = {'Content-Type': 'application/json'}
         self.market_cache: Dict = {}   # market_id -> {taker_fee_bps, maker_fee_bps, min_initial_margin_fraction}
         self.market_cache_loaded = False
-        self.funding_cache: Dict = {}  # market_id -> funding_rate (fraction, 8H period on Lighter)
-        self._last_funding_fetch = 0
-        self._funding_cache_ttl  = 60  # seconds
 
     # ------------------------------------------------------------------
     # Fees & max leverage
@@ -87,46 +84,6 @@ class LighterAPI:
             lev = 10000 / min_margin
             return round(lev, 2)
         return None
-
-    # ------------------------------------------------------------------
-    # Funding fee
-    # ------------------------------------------------------------------
-    def _fetch_funding_rates(self):
-        """Fetch current funding rates from /funding-rates (reference rates per market)."""
-        now = time.time()
-        if self.funding_cache and (now - self._last_funding_fetch) < self._funding_cache_ttl:
-            return
-        try:
-            resp = requests.get(f"{self.base_url}/funding-rates", headers=self.headers, timeout=30)
-            if resp.status_code == 200:
-                for entry in resp.json().get('funding_rates', []):
-                    if entry.get('exchange') != 'lighter':
-                        continue
-                    mid = entry.get('market_id')
-                    rate = entry.get('rate', 0)
-                    if mid is not None:
-                        key = int(mid) if isinstance(mid, (int, float)) else mid
-                        self.funding_cache[key] = float(rate)
-                self._last_funding_fetch = now
-        except Exception:
-            log.exception("Error fetching Lighter funding rates")
-
-    def get_holding_fee(self, market_id: int) -> Dict:
-        """
-        Return 1H and 24H holding fee for *market_id* as % of notional.
-        The /funding-rates API returns an 8H rate as a fraction (e.g. 0.0001 = 0.01%).
-        Positive = longs pay shorts; negative = shorts pay longs.
-        """
-        self._fetch_funding_rates()
-        key = self._market_key(market_id)
-        rate_8h_raw     = self.funding_cache.get(key, 0.0) if key is not None else 0.0
-        holding_8h_pct  = rate_8h_raw * 100
-        holding_1h_pct  = holding_8h_pct / 8
-        holding_24h_pct = math.floor(holding_8h_pct * 3 * 1_000_000) / 1_000_000
-        return {
-            'holding_fee_1h_pct':  round(holding_1h_pct, 6),
-            'holding_fee_24h_pct': holding_24h_pct,
-        }
 
     # ------------------------------------------------------------------
     # Orderbook
@@ -192,7 +149,5 @@ class LighterAPI:
             result['fee_bps']        = taker_fee_bps
             result['maker_fee_bps']  = maker_fee_bps
             result['max_leverage']   = self.get_max_leverage(market_id)
-            holding                  = self.get_holding_fee(market_id)
-            result.update(holding)
 
         return result
