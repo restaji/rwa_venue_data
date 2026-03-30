@@ -39,6 +39,7 @@ class AssetConfig:
     edgex_symbol: Optional[str] = None      # EdgeX display symbol override (if different from symbol_key)
     grvt_instrument: Optional[str] = None   # GRVT instrument name (e.g. XAU_USDT_Perp)
     avantis_x_instrument: Optional[str] = None  # LMAX instrument name for AvantisX (e.g. Gold (Spot))
+    extended_display_symbol: Optional[str] = None  # Extended display symbol override (if different from extended_symbol)
 
 
 ASSETS: Dict[str, AssetConfig] = {
@@ -63,8 +64,8 @@ ASSETS: Dict[str, AssetConfig] = {
     'TSLA':   AssetConfig('TSLA/USD', 'TSLA',   'stock',     'TSLA',  112, 'TSLAUSDT', 'TSLAUSD', None,         10000273, None, 'TSLA_USDT_Perp'),
 
     # Indices
-    'SPY':    AssetConfig('SPY/USD',  'SPY',    'index',     None,    128, None,       'SPYUSD',  None,         10000248),
-    'QQQ':    AssetConfig('QQQ/USD',  'QQQ',    'index',     None,    129, 'QQQUSDT',  'QQQUSD',  None,         10000249),
+    'SPY':    AssetConfig('SPY/USD',  'SPY',    'index',     'SP500',  128, None,       'SPXUSD',  'SPX500m-USD',    10000248, extended_display_symbol='SPX/USD'),
+    'QQQ':    AssetConfig('QQQ/USD',  'QQQ',    'index',     'XYZ100', 129, 'QQQUSDT',  'NDXUSD',  'TECH100m-USD', 10000249, extended_display_symbol='NDX/USD'),
 
     # Other
     'COIN':   AssetConfig('COIN/USD', 'COIN',   'stock',     'COIN',  109, None,       'COINUSD', None,         10000274, None, 'COIN_USDT_Perp'),

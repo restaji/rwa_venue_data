@@ -237,7 +237,7 @@ class FeeComparator:
             ob = self.extended.get_orderbook(config.extended_symbol)
             r  = self.extended.calculate_execution_cost(ob, order_size_usd, market=config.extended_symbol)
             if r:
-                r['symbol'] = config.extended_symbol
+                r['symbol'] = config.extended_display_symbol or config.extended_symbol
             return 'extended', r
 
         def fetch_edgex():
