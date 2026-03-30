@@ -146,8 +146,8 @@ class EdgeXAPI:
         Calculate execution cost for a given order size.
         Returns a standardized result dict compatible with comparator.py.
 
-        Slippage is measured from best_ask (buy) / best_bid (sell) — matching
-        EdgeX UI, which shows price impact beyond the best quote only.
+        Slippage is measured from mid-price ((best_bid + best_ask) / 2),
+        consistent with all other orderbook-based venues.
 
         For a long: opening = buy slippage, closing = sell slippage.
         For a short: opening = sell slippage, closing = buy slippage.
@@ -166,18 +166,8 @@ class EdgeXAPI:
         if not result:
             return None
 
-        # Recalculate slippage from best_ask/best_bid (not mid) to match EdgeX UI
-        best_ask = ob.best_ask
-        best_bid = ob.best_bid
-        buy_avg  = result.get('buy',  {}).get('avg_price', best_ask)
-        sell_avg = result.get('sell', {}).get('avg_price', best_bid)
-
-        buy_slip_bps  = abs(buy_avg  - best_ask) / best_ask * 10_000 if best_ask > 0 else 0.0
-        sell_slip_bps = abs(best_bid - sell_avg) / best_bid * 10_000 if best_bid > 0 else 0.0
-
-        result['buy_slippage_bps']  = buy_slip_bps
-        result['sell_slippage_bps'] = sell_slip_bps
-        result['slippage_bps']      = (buy_slip_bps + sell_slip_bps) / 2
+        buy_slip_bps  = result.get('buy_slippage_bps', 0.0)
+        sell_slip_bps = result.get('sell_slippage_bps', 0.0)
 
         is_long = direction.lower() == 'long'
         result['opening_slippage_bps'] = buy_slip_bps  if is_long else sell_slip_bps
