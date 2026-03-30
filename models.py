@@ -45,8 +45,8 @@ ASSETS: Dict[str, AssetConfig] = {
     # Commodities                                                                                     
     'XAU':    AssetConfig('XAU/USD',  'XAU',    'commodity', 'GOLD',   92,  'XAUUSDT',  'XAUUSD',  'XAU-USD',    10000234, 'XAUT',       'XAU_USDT_Perp',  avantis_x_instrument='Gold (Spot)'),
     'XAG':    AssetConfig('XAG/USD',  'XAG',    'commodity', 'SILVER', 93,  'XAGUSDT',  'XAGUSD',  'XAG-USD',    10000278, 'SILVERUSDT', 'XAG_USDT_Perp',  avantis_x_instrument='Silver (Spot)'),
-    'WTI':    AssetConfig('WTI/USD',  'WTI',    'commodity', 'CL',           145, 'CLUSDT', 'CLUSD',     'WTI-USD', 10000283, 'CLUSD'),
-    'BRENT':  AssetConfig('BRENT/USD','BRENT',  'commodity', 'BRENTOIL',     146, None,     'BRENTUSD',  'XBR-USD'),
+    'WTI':    AssetConfig('WTI/USD',  'WTI',    'commodity', 'CL',           145, 'CLUSDT', 'CLUSD',     'WTI-USD', 10000283, 'CLUSD',  avantis_x_instrument='US Crude (Spot)'),
+    'BRENT':  AssetConfig('BRENT/USD','BRENT',  'commodity', 'BRENTOIL',     146, None,     'BRENTUSD',  'XBR-USD', avantis_x_instrument='UK Brent (Spot)'),
 
     # Forex
     'EURUSD': AssetConfig('EUR/USD',  'EURUSD', 'forex',     'EUR',   96,  None,       'EURUSD',  'EUR-USD',    None,     None,         None,             avantis_x_instrument='EUR/USD'),
