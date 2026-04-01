@@ -104,34 +104,33 @@ class AvantisAPI:
                 except (TypeError, ValueError):
                     return 0.0
 
+            raw_spread = data.get("dynamicSpreadPct")
+            error_code = metadata.get("errorCode")
             return {
-                "spread_bps":               to_bps(data.get("dynamicSpreadPct", 0)),
+                "spread_bps":               to_bps(raw_spread) if raw_spread is not None else None,
                 "fixed_spread_bps":         to_bps(metadata.get("fixedSpreadPct", 0)),
                 "price_impact_spread_bps":  to_bps(metadata.get("priceImpactSpreadPct", 0)),
                 "skew_impact_spread_bps":   to_bps(metadata.get("skewImpactSpreadPct", 0)),
                 "is_dynamic_spread_enabled": metadata.get("isDynamicSpreadEnabled", False),
+                "error_code":               error_code,
+                "lp_bids":                  metadata.get("bids"),
+                "lp_asks":                  metadata.get("asks"),
             }
         except Exception:
             log.exception("Avantis Risk API error for pair %s", pair_index)
             return None
 
-    def _get_spread(self, pair_idx: str, pair_info: Dict, position_size: float, is_long: bool = True) -> Tuple[float, Dict]:
+    def _get_spread(self, pair_idx: str, pair_info: Dict, position_size: float, is_long: bool = True) -> Tuple[Optional[float], Dict]:
         """
-        Get spread for a pair based on group's isSpreadDynamic flag.
-        - If isSpreadDynamic is True: fetch from Risk API v2 with full breakdown
-        - If isSpreadDynamic is False: use static spreadP from socket data
+        Fetch spread exclusively from Risk API v2 (SpreadController_getSpreadV2).
+        Uses dynamicSpreadPct as the spread value directly — no fallback to spreadP.
         Returns (spread_bps, spread_metadata).
+        spread_bps is None when the API returns null (e.g. OUT_OF_LIQUIDITY).
         """
-        group_index = pair_info.get("groupIndex", 0)
-        group       = self._group_info.get(str(group_index), {})
-
-        if group.get("isSpreadDynamic", False):
-            result = self._fetch_dynamic_spread(int(pair_idx), position_size, is_long, is_pnl=False)
-            if result is not None:
-                return result["spread_bps"], result
-
-        spread_bps = pair_info.get("spreadP", 0) * 100
-        return spread_bps, {"spread_bps": spread_bps, "is_dynamic_spread_enabled": False}
+        result = self._fetch_dynamic_spread(int(pair_idx), position_size, is_long, is_pnl=False)
+        if result is not None:
+            return result["spread_bps"], result
+        return None, {"spread_bps": None, "is_dynamic_spread_enabled": False}
 
     def calculate_cost(self, asset_key: str, order_size_usd: float, is_long: bool = True) -> Optional[Dict]:
         result = self._get_pair_info(asset_key)
@@ -145,10 +144,14 @@ class AvantisAPI:
         unfilled_usd  = max(0, order_size_usd - max_wallet_oi)
         position_size = filled_usd
 
-        open_fee_bps          = self._calculate_opening_fee(pair_info, position_size, is_long=is_long)
-        close_fee_bps         = pair_info.get("closeFeeP", 0) * 100
+        open_fee_bps            = self._calculate_opening_fee(pair_info, position_size, is_long=is_long)
+        close_fee_bps           = pair_info.get("closeFeeP", 0) * 100
         spread_bps, spread_meta = self._get_spread(pair_idx, pair_info, position_size, is_long=is_long)
-        total_cost            = spread_bps + open_fee_bps + close_fee_bps
+
+        if spread_bps is None:
+            return None
+
+        total_cost = spread_bps + open_fee_bps + close_fee_bps
 
         max_lev = pair_info.get("leverages", {}).get("maxLeverage")
 
@@ -176,6 +179,7 @@ class AvantisAPI:
             'price_impact_spread_bps':   spread_meta.get('price_impact_spread_bps', 0.0),
             'skew_impact_spread_bps':    spread_meta.get('skew_impact_spread_bps', 0.0),
             'is_dynamic_spread_enabled': spread_meta.get('is_dynamic_spread_enabled', False),
+            'spread_error_code':         spread_meta.get('error_code'),
             'buy':  {'filled': filled, 'filled_usd': filled_usd, 'unfilled_usd': unfilled_usd, 'levels_used': 1, 'slippage_bps': spread_bps},
             'sell': {'filled': filled, 'filled_usd': filled_usd, 'unfilled_usd': unfilled_usd, 'levels_used': 1, 'slippage_bps': 0.0},
             'timestamp':                 time.time(),
