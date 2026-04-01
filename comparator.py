@@ -20,7 +20,6 @@ from exchanges.hyperliquid  import HyperliquidAPI
 from exchanges.lighter      import LighterAPI
 from exchanges.aster        import AsterAPI
 from exchanges.avantis      import AvantisAPI
-from exchanges.avantis_x    import AvantisXAPI
 from exchanges.ostium       import OstiumAPI
 from exchanges.extended     import ExtendedAPI
 from exchanges.edgex        import EdgeXAPI
@@ -33,7 +32,6 @@ class FeeComparator:
         self.lighter      = LighterAPI()
         self.aster        = AsterAPI()
         self.avantis      = AvantisAPI()
-        self.avantis_x    = AvantisXAPI(avantis=self.avantis)
         self.ostium       = OstiumAPI()
         self.extended     = ExtendedAPI()
         self.edgex        = EdgeXAPI()
@@ -161,7 +159,6 @@ class FeeComparator:
             'lighter':       None,
             'aster':         None,
             'avantis':       None,
-            'avantis_x':     None,
             'ostium':        None,
             'extended':      None,
             'edgex':         None,
@@ -171,7 +168,6 @@ class FeeComparator:
                 'lighter':      config.symbol_key if config.lighter_market_id else None,
                 'aster':        config.aster_symbol,
                 'avantis':      config.symbol_key,
-                'avantis_x':    config.avantis_x_instrument,
                 'ostium':       config.ostium_symbol,
                 'extended':     config.extended_symbol,
                 'edgex':        (config.edgex_symbol or config.symbol_key) if config.edgex_contract_id else None,
@@ -216,13 +212,6 @@ class FeeComparator:
                 r['symbol'] = r.get('symbol') or config.symbol_key
             return 'avantis', r
 
-        def fetch_avantis_x():
-            r = self.avantis_x.calculate_cost(
-                asset_key, order_size_usd, is_long=is_long,
-                instrument_name=config.avantis_x_instrument,
-            )
-            return 'avantis_x', r
-
         def fetch_ostium():
             if not config.ostium_symbol:
                 return 'ostium', None
@@ -254,7 +243,7 @@ class FeeComparator:
             return 'grvt', r
 
         tasks = [fetch_hyperliquid, fetch_lighter, fetch_aster, fetch_avantis,
-                 fetch_avantis_x, fetch_ostium, fetch_extended, fetch_edgex, fetch_grvt]
+                 fetch_ostium, fetch_extended, fetch_edgex, fetch_grvt]
 
         with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
             futures = {executor.submit(fn): fn for fn in tasks}
@@ -269,8 +258,6 @@ class FeeComparator:
                     else:
                         name, r = res
                         result[name] = r
-                        if name == 'avantis_x' and r:
-                            result['symbols']['avantis_x'] = r.get('symbol', config.symbol_key)
                 except Exception:
                     log.exception("Exchange fetch error")
 
@@ -343,10 +330,6 @@ class FeeComparator:
         if av:
             fee_structure['avantis'] = {'open': av.get('open_fee_bps', 0), 'close': av.get('close_fee_bps', 0)}
 
-        av_x = result.get('avantis_x')
-        if av_x:
-            fee_structure['avantis_x'] = {'open': av_x.get('open_fee_bps', 0), 'close': av_x.get('close_fee_bps', 0)}
-
         # Standardize opening/closing slippage by direction
         is_long = (direction == 'long')
         for name in ['hyperliquid', 'lighter', 'aster', 'ostium', 'extended', 'edgex', 'grvt']:
@@ -359,12 +342,12 @@ class FeeComparator:
                 ex_data['slippage_type']         = 'opening_closing'
 
         # Calculate totals and collect for winner ranking
-        for name in ['hyperliquid', 'lighter', 'aster', 'avantis', 'avantis_x', 'ostium', 'extended', 'edgex', 'grvt']:
+        for name in ['hyperliquid', 'lighter', 'aster', 'avantis', 'ostium', 'extended', 'edgex', 'grvt']:
             ex_data = result.get(name)
             if ex_data:
                 fees           = fee_structure.get(name, {'open': None, 'close': None})
                 slippage       = ex_data.get('slippage_bps', 0)
-                effective_spread = slippage if name in ('avantis', 'avantis_x') else 2 * slippage
+                effective_spread = slippage if name == 'avantis' else 2 * slippage
                 f_open         = fees['open']
                 f_close        = fees['close']
                 if f_open is None or f_close is None:

@@ -5,7 +5,6 @@ from .hyperliquid  import HyperliquidAPI
 from .lighter      import LighterAPI
 from .aster        import AsterAPI
 from .avantis      import AvantisAPI
-from .avantis_x    import AvantisXAPI
 from .ostium       import OstiumAPI
 from .extended     import ExtendedAPI
 from .edgex        import EdgeXAPI
@@ -16,7 +15,6 @@ __all__ = [
     "LighterAPI",
     "AsterAPI",
     "AvantisAPI",
-    "AvantisXAPI",
     "OstiumAPI",
     "ExtendedAPI",
     "EdgeXAPI",

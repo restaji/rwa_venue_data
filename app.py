@@ -87,7 +87,6 @@ def get_assets():
                 'lighter':      config.lighter_market_id  is not None,
                 'aster':        config.aster_symbol       is not None,
                 'avantis':      True,
-                'avantis_x':    config.avantis_x_instrument is not None,
                 'ostium':       config.ostium_symbol      is not None,
                 'extended':     config.extended_symbol    is not None,
                 'edgex':        config.edgex_contract_id  is not None,

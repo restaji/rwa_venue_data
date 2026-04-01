@@ -22,7 +22,7 @@ class AvantisAPI:
     """Dynamic fee and spread calculation for Avantis."""
 
     SOCKET_API   = "https://socket-api-pub.avantisfi.com/socket-api/v1/data?override=true"
-    RISK_API     = "https://risk-api.avantisfi.com/v1/dynamic-spread"
+    RISK_API     = "https://risk-api.avantisfi.com/v2/dynamic-spread"  # SpreadController_getSpreadV2
     DUMMY_TRADER = "0x1234567890123456789012345678901234567890"
 
     PAIRS = {
@@ -78,11 +78,11 @@ class AvantisAPI:
         param1, param2 = skew_params[pct_index][0], skew_params[pct_index][1]
         return ((param1 * open_interest_pct + param2) / 10000) * 100
 
-    def _fetch_dynamic_spread(self, pair_index: int, position_size: float, is_long: bool, is_pnl: bool) -> Optional[float]:
+    def _fetch_dynamic_spread(self, pair_index: int, position_size: float, is_long: bool, is_pnl: bool) -> Optional[Dict]:
         """
-        Fetch dynamic spread from Risk API v1.
-        Endpoint: GET /v1/dynamic-spread/{pairIndex}
-        Returns spread in bps.
+        Fetch dynamic spread from Risk API v2.
+        Endpoint: GET /v2/dynamic-spread/{pairIndex}
+        Returns dict with spread_bps and v2 metadata breakdown.
         """
         url = f"{self.RISK_API}/{pair_index}"
         params = {
@@ -94,28 +94,44 @@ class AvantisAPI:
             "trader":         self.DUMMY_TRADER,
         }
         try:
-            data = requests.get(url, params=params, timeout=30).json()
-            dynamic_spread = float(data.get("dynamicSpreadPct", 0))
-            return dynamic_spread / (10 ** 18) * 100
+            data     = requests.get(url, params=params, timeout=30).json()
+            metadata = data.get("metadata", {})
+            scale    = 10 ** 18
+
+            def to_bps(raw):
+                try:
+                    return float(raw) / scale * 100
+                except (TypeError, ValueError):
+                    return 0.0
+
+            return {
+                "spread_bps":               to_bps(data.get("dynamicSpreadPct", 0)),
+                "fixed_spread_bps":         to_bps(metadata.get("fixedSpreadPct", 0)),
+                "price_impact_spread_bps":  to_bps(metadata.get("priceImpactSpreadPct", 0)),
+                "skew_impact_spread_bps":   to_bps(metadata.get("skewImpactSpreadPct", 0)),
+                "is_dynamic_spread_enabled": metadata.get("isDynamicSpreadEnabled", False),
+            }
         except Exception:
             log.exception("Avantis Risk API error for pair %s", pair_index)
             return None
 
-    def _get_spread(self, pair_idx: str, pair_info: Dict, position_size: float, is_long: bool = True) -> float:
+    def _get_spread(self, pair_idx: str, pair_info: Dict, position_size: float, is_long: bool = True) -> Tuple[float, Dict]:
         """
         Get spread for a pair based on group's isSpreadDynamic flag.
-        - If isSpreadDynamic is True: fetch from Risk API
+        - If isSpreadDynamic is True: fetch from Risk API v2 with full breakdown
         - If isSpreadDynamic is False: use static spreadP from socket data
+        Returns (spread_bps, spread_metadata).
         """
         group_index = pair_info.get("groupIndex", 0)
-        group = self._group_info.get(str(group_index), {})
-        
+        group       = self._group_info.get(str(group_index), {})
+
         if group.get("isSpreadDynamic", False):
-            spread = self._fetch_dynamic_spread(int(pair_idx), position_size, is_long, is_pnl=False)
-            if spread is not None:
-                return spread
-        
-        return pair_info.get("spreadP", 0) * 100
+            result = self._fetch_dynamic_spread(int(pair_idx), position_size, is_long, is_pnl=False)
+            if result is not None:
+                return result["spread_bps"], result
+
+        spread_bps = pair_info.get("spreadP", 0) * 100
+        return spread_bps, {"spread_bps": spread_bps, "is_dynamic_spread_enabled": False}
 
     def calculate_cost(self, asset_key: str, order_size_usd: float, is_long: bool = True) -> Optional[Dict]:
         result = self._get_pair_info(asset_key)
@@ -129,35 +145,37 @@ class AvantisAPI:
         unfilled_usd  = max(0, order_size_usd - max_wallet_oi)
         position_size = filled_usd
 
-        open_fee_bps  = self._calculate_opening_fee(pair_info, position_size, is_long=is_long)
-        close_fee_bps = pair_info.get("closeFeeP", 0) * 100
-        spread_bps    = self._get_spread(pair_idx, pair_info, position_size, is_long=is_long)
-        total_cost    = spread_bps + open_fee_bps + close_fee_bps
+        open_fee_bps          = self._calculate_opening_fee(pair_info, position_size, is_long=is_long)
+        close_fee_bps         = pair_info.get("closeFeeP", 0) * 100
+        spread_bps, spread_meta = self._get_spread(pair_idx, pair_info, position_size, is_long=is_long)
+        total_cost            = spread_bps + open_fee_bps + close_fee_bps
 
-        leverages      = pair_info.get("leverages", {})
-        storage_params = pair_info.get("storagePairParams", {})
-        max_lev = leverages.get("maxLeverage")
+        max_lev = pair_info.get("leverages", {}).get("maxLeverage")
 
         return {
-            'symbol':               asset_key,
-            'max_leverage':         max_lev,
-            'executed':             True if filled else 'PARTIAL',
-            'mid_price':            0,
-            'slippage_bps':         spread_bps,
-            'opening_slippage_bps': spread_bps,
-            'closing_slippage_bps': 0.0,
-            'buy_slippage_bps':     spread_bps,
-            'sell_slippage_bps':    0.0,
-            'slippage_type':        'opening_closing',
-            'open_fee_bps':         open_fee_bps,
-            'close_fee_bps':        close_fee_bps,
-            'maker_fee_bps':        open_fee_bps,
-            'total_cost_bps':       total_cost,
-            'filled':               filled,
-            'order_size_usd':       order_size_usd,
-            'filled_usd':           filled_usd,
-            'unfilled_usd':         unfilled_usd,
-            'max_wallet_oi':        max_wallet_oi,
+            'symbol':                    asset_key,
+            'max_leverage':              max_lev,
+            'executed':                  True if filled else 'PARTIAL',
+            'mid_price':                 0,
+            'slippage_bps':              spread_bps,
+            'opening_slippage_bps':      spread_bps,
+            'closing_slippage_bps':      0.0,
+            'buy_slippage_bps':          spread_bps,
+            'sell_slippage_bps':         0.0,
+            'slippage_type':             'opening_closing',
+            'open_fee_bps':              open_fee_bps,
+            'close_fee_bps':             close_fee_bps,
+            'maker_fee_bps':             open_fee_bps,
+            'total_cost_bps':            total_cost,
+            'filled':                    filled,
+            'order_size_usd':            order_size_usd,
+            'filled_usd':                filled_usd,
+            'unfilled_usd':              unfilled_usd,
+            'max_wallet_oi':             max_wallet_oi,
+            'fixed_spread_bps':          spread_meta.get('fixed_spread_bps', 0.0),
+            'price_impact_spread_bps':   spread_meta.get('price_impact_spread_bps', 0.0),
+            'skew_impact_spread_bps':    spread_meta.get('skew_impact_spread_bps', 0.0),
+            'is_dynamic_spread_enabled': spread_meta.get('is_dynamic_spread_enabled', False),
             'buy':  {'filled': filled, 'filled_usd': filled_usd, 'unfilled_usd': unfilled_usd, 'levels_used': 1, 'slippage_bps': spread_bps},
             'sell': {'filled': filled, 'filled_usd': filled_usd, 'unfilled_usd': unfilled_usd, 'levels_used': 1, 'slippage_bps': 0.0},
             'timestamp':                 time.time(),
