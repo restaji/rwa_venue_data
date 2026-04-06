@@ -174,6 +174,31 @@ class OstiumAPI:
                         except (TypeError, ValueError):
                             pass
 
+                        # OI / liquidity cap fields
+                        max_oi_usd = 0.0
+                        try:
+                            max_oi_usd = int(pair.get('maxOI', 0)) / 1e6
+                        except (TypeError, ValueError):
+                            pass
+
+                        long_oi_raw = 0
+                        try:
+                            long_oi_raw = int(pair.get('longOI', 0))
+                        except (TypeError, ValueError):
+                            pass
+
+                        short_oi_raw = 0
+                        try:
+                            short_oi_raw = int(pair.get('shortOI', 0))
+                        except (TypeError, ValueError):
+                            pass
+
+                        last_trade_price_raw = 0
+                        try:
+                            last_trade_price_raw = int(pair.get('lastTradePrice', 0))
+                        except (TypeError, ValueError):
+                            pass
+
                         if taker_fee_bps is not None:
                             cache[symbol] = {
                                 'fee_bps':                      taker_fee_bps,
@@ -190,6 +215,11 @@ class OstiumAPI:
                                 'is_negative_rollover_allowed': is_negative_rollover_allowed,
                                 'last_rollover_block':          last_rollover_block,
                                 'last_funding_time':            last_funding_time,
+                                # OI / liquidity cap fields
+                                'max_oi_usd':                   max_oi_usd,
+                                'long_oi_raw':                  long_oi_raw,
+                                'short_oi_raw':                 short_oi_raw,
+                                'last_trade_price_raw':         last_trade_price_raw,
                             }
                     # blocks_per_day is fetched live via Arbitrum RPC in get_rollover_rate_24h
 
@@ -395,14 +425,37 @@ class OstiumAPI:
         )
 
     # ------------------------------------------------------------------
+    # Liquidity cap helpers
+    # ------------------------------------------------------------------
+    def _get_remaining_oi_usd(self, asset_data: Dict, mid_price: float) -> Tuple[float, float]:
+        """
+        Compute remaining OI capacity per side using live mid_price.
+        Returns: (remaining_long_usd, remaining_short_usd)
+        """
+        max_oi    = asset_data.get('max_oi_usd', 0)
+        long_raw  = asset_data.get('long_oi_raw', 0)
+        short_raw = asset_data.get('short_oi_raw', 0)
+
+        if max_oi <= 0 or mid_price <= 0:
+            return float('inf'), float('inf')
+
+        current_long_usd  = (long_raw  / self.PRECISION_18) * mid_price
+        current_short_usd = (short_raw / self.PRECISION_18) * mid_price
+
+        remaining_long  = max(0, max_oi - current_long_usd)
+        remaining_short = max(0, max_oi - current_short_usd)
+        return remaining_long, remaining_short
+
+    # ------------------------------------------------------------------
     # Execution cost
     # ------------------------------------------------------------------
-    def calculate_execution_cost(self, asset: str, order_size_usd: float) -> Optional[Dict]:
+    def calculate_execution_cost(self, asset: str, order_size_usd: float, is_long: bool = True) -> Optional[Dict]:
         """
-        Calculate execution cost with dynamic spread.
+        Calculate execution cost with dynamic spread and liquidity cap.
 
         Uses Ostium's dynamic spread formula when priceImpactK is available;
         falls back to basic bid/ask spread otherwise.
+        Orders exceeding remaining OI capacity are returned as PARTIAL fills.
         """
         raw_data = self.get_orderbook(asset)
         if not raw_data:
@@ -425,6 +478,16 @@ class OstiumAPI:
         if open_fee_bps is None:
             return None
 
+        # Liquidity cap: remaining OI capacity per side
+        remaining_long, remaining_short = self._get_remaining_oi_usd(asset_data, mid_price)
+        liq_cap      = remaining_long if is_long else remaining_short
+        max_oi_usd   = asset_data.get('max_oi_usd', 0)
+
+        filled       = order_size_usd <= liq_cap
+        filled_usd   = min(order_size_usd, liq_cap) if liq_cap != float('inf') else order_size_usd
+        unfilled_usd = max(0, order_size_usd - filled_usd)
+        position_size = filled_usd
+
         price_impact_k = asset_data.get('price_impact_k')
         is_dynamic     = price_impact_k is not None and price_impact_k > 0
 
@@ -435,7 +498,7 @@ class OstiumAPI:
             decayed_buy_usd, decayed_sell_usd = self._get_decayed_volumes_usd(asset_data)
 
             buy_spread_bps = self._calculate_dynamic_spread(
-                notional_usd=order_size_usd,
+                notional_usd=position_size,
                 price_impact_k=price_impact_k,
                 mid_price=mid_price,
                 ask_price=ask_price,
@@ -443,7 +506,7 @@ class OstiumAPI:
                 initial_volume_usd=decayed_buy_usd,
             )
             sell_spread_bps = self._calculate_dynamic_spread(
-                notional_usd=order_size_usd,
+                notional_usd=position_size,
                 price_impact_k=price_impact_k,
                 mid_price=mid_price,
                 ask_price=ask_price,
@@ -460,6 +523,14 @@ class OstiumAPI:
         sell_exec_price = mid_price * (1 - sell_spread_bps / 10000)
 
         return {
+            'executed':                True if filled else 'PARTIAL',
+            'filled':                  filled,
+            'order_size_usd':          order_size_usd,
+            'filled_usd':              filled_usd,
+            'unfilled_usd':            unfilled_usd,
+            'max_order_size':          liq_cap if liq_cap != float('inf') else max_oi_usd,
+            'max_oi_usd':              max_oi_usd,
+            'liquidity_cap':           liq_cap if liq_cap != float('inf') else max_oi_usd,
             'mid_price':               mid_price,
             'best_bid':                bid_price,
             'best_ask':                ask_price,
@@ -472,7 +543,7 @@ class OstiumAPI:
             'max_leverage':            asset_data.get('max_leverage'),
             'is_dynamic_spread':       is_dynamic,
             'timestamp':               time.time(),
-            'buy':  {'avg_price': buy_exec_price,  'slippage_bps': buy_spread_bps,  'levels_used': 1},
-            'sell': {'avg_price': sell_exec_price, 'slippage_bps': sell_spread_bps, 'levels_used': 1},
+            'buy':  {'filled': filled, 'filled_usd': filled_usd, 'unfilled_usd': unfilled_usd, 'avg_price': buy_exec_price,  'slippage_bps': buy_spread_bps,  'levels_used': 1},
+            'sell': {'filled': filled, 'filled_usd': filled_usd, 'unfilled_usd': unfilled_usd, 'avg_price': sell_exec_price, 'slippage_bps': sell_spread_bps, 'levels_used': 1},
         }
 

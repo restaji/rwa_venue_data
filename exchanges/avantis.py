@@ -78,9 +78,9 @@ class AvantisAPI:
         param1, param2 = skew_params[pct_index][0], skew_params[pct_index][1]
         return ((param1 * open_interest_pct + param2) / 10000) * 100
 
-    def _fetch_dynamic_spread(self, pair_index: int, position_size: float, is_long: bool, is_pnl: bool) -> Optional[Dict]:
+    def _fetch_dynamic_spread(self, pair_index: int, position_size: float, is_long: bool, is_pnl: bool, max_retries: int = 5) -> Optional[Dict]:
         """
-        Fetch dynamic spread from Risk API v2.
+        Fetch dynamic spread from Risk API v2 with retries.
         Endpoint: GET /v2/dynamic-spread/{pairIndex}
         Returns dict with spread_bps and v2 metadata breakdown.
         """
@@ -93,32 +93,37 @@ class AvantisAPI:
             "precision":      18,
             "trader":         self.DUMMY_TRADER,
         }
-        try:
-            data     = requests.get(url, params=params, timeout=30).json()
-            metadata = data.get("metadata", {})
-            scale    = 10 ** 18
+        scale = 10 ** 18
 
-            def to_bps(raw):
-                try:
-                    return float(raw) / scale * 100
-                except (TypeError, ValueError):
-                    return 0.0
+        def to_bps(raw):
+            try:
+                return float(raw) / scale * 100
+            except (TypeError, ValueError):
+                return 0.0
 
-            raw_spread = data.get("dynamicSpreadPct")
-            error_code = metadata.get("errorCode")
-            return {
-                "spread_bps":               to_bps(raw_spread) if raw_spread is not None else None,
-                "fixed_spread_bps":         to_bps(metadata.get("fixedSpreadPct", 0)),
-                "price_impact_spread_bps":  to_bps(metadata.get("priceImpactSpreadPct", 0)),
-                "skew_impact_spread_bps":   to_bps(metadata.get("skewImpactSpreadPct", 0)),
-                "is_dynamic_spread_enabled": metadata.get("isDynamicSpreadEnabled", False),
-                "error_code":               error_code,
-                "lp_bids":                  metadata.get("bids"),
-                "lp_asks":                  metadata.get("asks"),
-            }
-        except Exception:
-            log.exception("Avantis Risk API error for pair %s", pair_index)
-            return None
+        last_result = None
+        for attempt in range(max_retries):
+            try:
+                data       = requests.get(url, params=params, timeout=30).json()
+                metadata   = data.get("metadata", {})
+                raw_spread = data.get("dynamicSpreadPct")
+                error_code = metadata.get("errorCode")
+                last_result = {
+                    "spread_bps":               to_bps(raw_spread) if raw_spread is not None else None,
+                    "fixed_spread_bps":         to_bps(metadata.get("fixedSpreadPct", 0)),
+                    "price_impact_spread_bps":  to_bps(metadata.get("priceImpactSpreadPct", 0)),
+                    "skew_impact_spread_bps":   to_bps(metadata.get("skewImpactSpreadPct", 0)),
+                    "is_dynamic_spread_enabled": metadata.get("isDynamicSpreadEnabled", False),
+                    "error_code":               error_code,
+                    "lp_bids":                  metadata.get("bids"),
+                    "lp_asks":                  metadata.get("asks"),
+                }
+                if last_result["spread_bps"] is not None:
+                    return last_result
+            except Exception:
+                log.exception("Avantis Risk API error for pair %s (attempt %d/%d)", pair_index, attempt + 1, max_retries)
+
+        return last_result
 
     def _get_spread(self, pair_idx: str, pair_info: Dict, position_size: float, is_long: bool = True) -> Tuple[Optional[float], Dict]:
         """
@@ -139,21 +144,43 @@ class AvantisAPI:
         pair_idx, pair_info = result
 
         max_wallet_oi = pair_info.get("maxWalletOI", float('inf'))
-        filled        = order_size_usd <= max_wallet_oi
-        filled_usd    = min(order_size_usd, max_wallet_oi)
-        unfilled_usd  = max(0, order_size_usd - max_wallet_oi)
+        liquidity     = pair_info.get("liquidity", {})
+        liq_cap       = liquidity.get("sell", float('inf')) if is_long else liquidity.get("buy", float('inf'))
+        max_order     = min(max_wallet_oi, liq_cap)
+
+        filled        = order_size_usd <= max_order
+        filled_usd    = min(order_size_usd, max_order)
+        unfilled_usd  = max(0, order_size_usd - max_order)
         position_size = filled_usd
 
-        open_fee_bps            = self._calculate_opening_fee(pair_info, position_size, is_long=is_long)
         close_fee_bps           = pair_info.get("closeFeeP", 0) * 100
+        max_lev                 = pair_info.get("leverages", {}).get("maxLeverage")
+
+        open_fee_bps            = self._calculate_opening_fee(pair_info, position_size, is_long=is_long)
         spread_bps, spread_meta = self._get_spread(pair_idx, pair_info, position_size, is_long=is_long)
 
         if spread_bps is None:
-            return None
+            fallback_base = liq_cap if liq_cap not in (float('inf'), 0) else position_size
+            for pct in (1.0, 0.90, 0.75, 0.50):
+                retry_size = fallback_base * pct
+                if retry_size <= 0 or retry_size == position_size:
+                    continue
+                spread_bps, spread_meta = self._get_spread(pair_idx, pair_info, retry_size, is_long=is_long)
+                if spread_bps is not None:
+                    position_size = retry_size
+                    filled_usd    = retry_size
+                    unfilled_usd  = max(0, order_size_usd - retry_size)
+                    filled        = False
+                    open_fee_bps  = self._calculate_opening_fee(pair_info, position_size, is_long=is_long)
+                    break
 
-        total_cost = spread_bps + open_fee_bps + close_fee_bps
+        if spread_bps is None:
+            filled = False
 
-        max_lev = pair_info.get("leverages", {}).get("maxLeverage")
+        total_cost = (spread_bps or 0) + open_fee_bps + close_fee_bps
+
+        def _safe(v):
+            return None if v == float('inf') else v
 
         return {
             'symbol':                    asset_key,
@@ -174,7 +201,9 @@ class AvantisAPI:
             'order_size_usd':            order_size_usd,
             'filled_usd':                filled_usd,
             'unfilled_usd':              unfilled_usd,
-            'max_wallet_oi':             max_wallet_oi,
+            'max_order_size':            _safe(max_order),
+            'max_wallet_oi':             _safe(max_wallet_oi),
+            'liquidity_cap':             _safe(liq_cap),
             'fixed_spread_bps':          spread_meta.get('fixed_spread_bps', 0.0),
             'price_impact_spread_bps':   spread_meta.get('price_impact_spread_bps', 0.0),
             'skew_impact_spread_bps':    spread_meta.get('skew_impact_spread_bps', 0.0),

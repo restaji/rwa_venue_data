@@ -215,7 +215,7 @@ class FeeComparator:
         def fetch_ostium():
             if not config.ostium_symbol:
                 return 'ostium', None
-            r = self.ostium.calculate_execution_cost(config.ostium_symbol, order_size_usd)
+            r = self.ostium.calculate_execution_cost(config.ostium_symbol, order_size_usd, is_long=is_long)
             if r:
                 r['symbol'] = config.ostium_symbol
             return 'ostium', r
