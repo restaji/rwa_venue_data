@@ -144,9 +144,18 @@ class AvantisAPI:
         pair_idx, pair_info = result
 
         max_wallet_oi = pair_info.get("maxWalletOI", float('inf'))
-        liquidity     = pair_info.get("liquidity", {})
-        liq_cap       = liquidity.get("sell", float('inf')) if is_long else liquidity.get("buy", float('inf'))
-        max_order     = min(max_wallet_oi, liq_cap)
+        pair_max_oi   = pair_info.get("pairMaxOI", 0)
+        values        = pair_info.get("values", {})
+        oi            = pair_info.get("openInterest", {})
+
+        if is_long:
+            per_side_cap = pair_max_oi * values.get("maxLongOiP", 100) / 100
+            liq_cap      = max(0, per_side_cap - oi.get("long", 0))
+        else:
+            per_side_cap = pair_max_oi * values.get("maxShortOiP", 100) / 100
+            liq_cap      = max(0, per_side_cap - oi.get("short", 0))
+
+        max_order     = min(max_wallet_oi, liq_cap) if liq_cap > 0 else 0
 
         filled        = order_size_usd <= max_order
         filled_usd    = min(order_size_usd, max_order)
