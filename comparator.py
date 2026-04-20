@@ -238,9 +238,15 @@ class FeeComparator:
 
         def fetch_grvt():
             if not config.grvt_instrument:
-                return 'grvt', None
-            r = self.grvt.calculate_execution_cost(config.grvt_instrument, order_size_usd, direction=direction, symbol=config.grvt_instrument)
-            return 'grvt', r
+                return (
+                    'grvt',
+                    None,
+                    {'code': 'not_configured_for_asset', 'message': 'No grvt_instrument in asset registry.'},
+                )
+            r, grvt_dbg = self.grvt.calculate_execution_cost(
+                config.grvt_instrument, order_size_usd, direction=direction, symbol=config.grvt_instrument
+            )
+            return 'grvt', r, grvt_dbg
 
         tasks = [fetch_hyperliquid, fetch_lighter, fetch_aster, fetch_avantis,
                  fetch_ostium, fetch_extended, fetch_edgex, fetch_grvt]
@@ -255,6 +261,11 @@ class FeeComparator:
                         result['hyperliquid'] = r
                         if sym:
                             result['symbols']['hyperliquid'] = sym
+                    elif res[0] == 'grvt':
+                        _, r, grvt_dbg = res
+                        result['grvt'] = r
+                        if grvt_dbg:
+                            result['grvt_debug'] = grvt_dbg
                     else:
                         name, r = res
                         result[name] = r

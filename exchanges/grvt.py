@@ -25,7 +25,7 @@ import logging
 import os
 import threading
 import time
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import requests
 from dotenv import load_dotenv
@@ -58,6 +58,10 @@ class GRVTAPI:
         self._maker_fee_bps: Optional[float] = None
         # authenticated session state
         self._account_id: Optional[str] = None
+        # Last fee-load outcome for API debugging (no secrets)
+        self._fee_status: Dict[str, Any] = {"code": "pending", "message": "Fee load not finished yet."}
+        # Last orderbook failure (per fetch)
+        self._last_orderbook_debug: Dict[str, Any] = {}
 
         self._load_instrument_meta()
         self._authenticate_and_load_fees()
@@ -85,6 +89,10 @@ class GRVTAPI:
         api_key = os.getenv("GRVT_API_KEY")
         if not api_key:
             log.warning("GRVT_API_KEY not configured")
+            self._fee_status = {
+                "code":    "no_api_key",
+                "message": "GRVT_API_KEY is not set in the environment.",
+            }
             return
 
         try:
@@ -111,6 +119,11 @@ class GRVTAPI:
 
             if not gravity_token or not account_id:
                 log.warning("GRVT auth failed: gravity=%r account_id=%r status=%s", gravity_token, account_id, resp.status_code)
+                self._fee_status = {
+                    "code":        "auth_failed",
+                    "http_status": resp.status_code,
+                    "message":     "Login did not return gravity session cookie or X-Grvt-Account-Id.",
+                }
                 return
 
             self._account_id = account_id
@@ -127,6 +140,11 @@ class GRVTAPI:
             )
             if fee_resp.status_code != 200:
                 log.warning("GRVT fee fetch failed: status=%s", fee_resp.status_code)
+                self._fee_status = {
+                    "code":        "fee_fetch_failed",
+                    "http_status": fee_resp.status_code,
+                    "message":     "funding_account_summary request failed.",
+                }
                 return
 
             tier = fee_resp.json().get("t", {})
@@ -136,11 +154,21 @@ class GRVTAPI:
             if ft is not None:
                 self._taker_fee_bps = float(ft) / 100
                 log.info("GRVT fees loaded: taker=%.2f bps, maker=%.2f bps", self._taker_fee_bps, self._maker_fee_bps or 0)
+                self._fee_status = {"code": "ok", "message": "Taker/maker fees loaded."}
+            else:
+                self._fee_status = {
+                    "code":    "fee_tier_missing_ft",
+                    "message": "funding_account_summary returned no taker fee (ft) in tier.",
+                }
             if fm is not None:
                 self._maker_fee_bps = float(fm) / 100
 
         except Exception:
             log.exception("GRVT fee auth error")
+            self._fee_status = {
+                "code":    "auth_exception",
+                "message": "Exception during GRVT login or fee fetch; see server logs.",
+            }
 
     def _start_auth_retry(self) -> None:
         """Retry authentication in a background thread after startup failure."""
@@ -228,14 +256,30 @@ class GRVTAPI:
                 timeout=15,
             )
             if resp.status_code != 200:
+                self._last_orderbook_debug = {
+                    "code":        "orderbook_http_error",
+                    "http_status": resp.status_code,
+                    "instrument":  instrument,
+                    "message":     "GRVT market-data book request failed.",
+                }
                 return None
             book = resp.json().get('result', {})
             if not book:
+                self._last_orderbook_debug = {
+                    "code":       "orderbook_empty_result",
+                    "instrument": instrument,
+                    "message":    "book response had no result payload.",
+                }
                 return None
 
             raw_asks = book.get('asks', [])
             raw_bids = book.get('bids', [])
             if not raw_asks or not raw_bids:
+                self._last_orderbook_debug = {
+                    "code":       "orderbook_no_sides",
+                    "instrument": instrument,
+                    "message":    "book had missing bids or asks.",
+                }
                 return None
 
             best_ask = float(raw_asks[0]['price'])
@@ -255,6 +299,11 @@ class GRVTAPI:
             )
         except Exception:
             log.exception("GRVT orderbook error for %s", instrument)
+            self._last_orderbook_debug = {
+                "code":       "orderbook_exception",
+                "instrument": instrument,
+                "message":    "Exception fetching book; see server logs.",
+            }
             return None
 
     # ------------------------------------------------------------------
@@ -266,7 +315,7 @@ class GRVTAPI:
         order_size_usd: float,
         direction: str = 'long',
         symbol: Optional[str] = None,
-    ) -> Optional[Dict]:
+    ) -> Tuple[Optional[Dict], Optional[Dict[str, Any]]]:
         """
         Calculate the round-trip execution cost for a given order size.
 
@@ -275,13 +324,32 @@ class GRVTAPI:
 
         For a long:  opening = buy slippage,  closing = sell slippage.
         For a short: opening = sell slippage, closing = buy slippage.
+
+        Returns:
+            (result_dict_or_none, debug_dict_or_none). When the first value is None,
+            the second contains a stable ``code`` for operators (no secrets).
         """
+        if not os.getenv("GRVT_API_KEY"):
+            return None, {
+                "code":    "no_api_key",
+                "message": "GRVT_API_KEY is not set in the environment.",
+            }
+
         if self._taker_fee_bps is None:
-            return None
+            dbg = dict(self._fee_status) if self._fee_status else {"code": "fees_unknown"}
+            dbg.setdefault(
+                "message",
+                "Taker fee not loaded; check GRVT_API_KEY, auth, and funding_account_summary.",
+            )
+            return None, dbg
 
         ob = self.get_orderbook(instrument)
         if not ob:
-            return None
+            return None, self._last_orderbook_debug or {
+                "code":       "orderbook_unavailable",
+                "instrument": instrument,
+                "message":    "Orderbook fetch returned no usable book.",
+            }
 
         taker_fee = self._taker_fee_bps
 
@@ -289,7 +357,11 @@ class GRVTAPI:
             ob, order_size_usd, taker_fee, taker_fee
         )
         if not result:
-            return None
+            return None, {
+                "code":       "execution_walk_failed",
+                "instrument": instrument,
+                "message":    "Could not fill order against book (insufficient depth or empty walk).",
+            }
 
         buy_slip_bps  = result.get('buy_slippage_bps', 0.0)
         sell_slip_bps = result.get('sell_slippage_bps', 0.0)
@@ -304,4 +376,4 @@ class GRVTAPI:
         result['max_leverage']  = self.get_max_leverage(instrument)
         result['taker_fee_bps'] = self._taker_fee_bps
         result['maker_fee_bps'] = self._maker_fee_bps
-        return result
+        return result, None

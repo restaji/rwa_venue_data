@@ -45,8 +45,21 @@ class OstiumAPI:
         self._blocks_per_day_fetched: float   = 0.0
         self._blocks_per_day_ttl: float       = 300.0  # re-fetch every 5 min
 
+        # Pairs + seasons (fee overrides); must refresh on long-lived workers or fees stay stale.
+        self._metadata_cache_ttl: float = 300.0
+        self._metadata_loaded_at: float = 0.0
+
         # Load metadata from Ostium pairs API (no fallbacks)
         self.metadata_cache = self._load_cache()
+        self._metadata_loaded_at = time.time()
+
+    def _ensure_metadata_fresh(self) -> None:
+        """Reload pairs + seasons when TTL expires (avoids stale season fee overrides on deploy)."""
+        now = time.time()
+        if (now - self._metadata_loaded_at) < self._metadata_cache_ttl and self.metadata_cache:
+            return
+        self.metadata_cache = self._load_cache()
+        self._metadata_loaded_at = time.time()
 
     # ------------------------------------------------------------------
     # Fees & metadata
@@ -74,7 +87,7 @@ class OstiumAPI:
                         symbol = f"{base}{quote}"
 
                         if p_id is not None:
-                            pair_id_map[p_id] = symbol
+                            pair_id_map[str(p_id)] = symbol
 
                         maker_fee_p = pair.get('makerFeeP')
                         taker_fee_p = pair.get('takerFeeP')
@@ -240,8 +253,9 @@ class OstiumAPI:
                     for asset_item in assets:
                         a_id    = asset_item.get('assetId')
                         new_fee = asset_item.get('newFee')
-                        if a_id is not None and new_fee is not None and a_id in pair_id_map:
-                            symbol = pair_id_map[a_id]
+                        aid_key = str(a_id) if a_id is not None else None
+                        if aid_key is not None and new_fee is not None and aid_key in pair_id_map:
+                            symbol = pair_id_map[aid_key]
                             if symbol in cache:
                                 new_fee_bps = float(new_fee) * 100.0
                                 cache[symbol]['fee_bps']       = new_fee_bps
@@ -253,16 +267,19 @@ class OstiumAPI:
 
     def get_fee_bps(self, ostium_symbol: str) -> Optional[float]:
         """Get the opening fee for an Ostium asset. Returns None if not available."""
+        self._ensure_metadata_fresh()
         data = self.metadata_cache.get(ostium_symbol)
         return data.get('fee_bps') if data else None
 
     def get_maker_fee_bps(self, ostium_symbol: str) -> Optional[float]:
         """Get the maker fee for an Ostium asset. Returns None if not available."""
+        self._ensure_metadata_fresh()
         data = self.metadata_cache.get(ostium_symbol)
         return data.get('maker_fee_bps') if data else None
 
     def get_max_leverage(self, ostium_symbol: str) -> Optional[float]:
         """Get max leverage."""
+        self._ensure_metadata_fresh()
         data = self.metadata_cache.get(ostium_symbol)
         return data.get('max_leverage') if data else None
 
@@ -279,6 +296,8 @@ class OstiumAPI:
         now = time.time()
         if self._blocks_per_day and (now - self._blocks_per_day_fetched) < self._blocks_per_day_ttl:
             return self._blocks_per_day
+
+        self._ensure_metadata_fresh()
 
         try:
             payload    = {'jsonrpc': '2.0', 'method': 'eth_blockNumber', 'params': [], 'id': 1}
@@ -460,6 +479,8 @@ class OstiumAPI:
         raw_data = self.get_orderbook(asset)
         if not raw_data:
             return None
+
+        self._ensure_metadata_fresh()
 
         mid_price = float(raw_data.get('mid', 0))
         bid_price = float(raw_data.get('bid', 0))
