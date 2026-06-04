@@ -118,11 +118,32 @@ class GRVTAPI:
             account_id = resp.headers.get("x-grvt-account-id") or resp.headers.get("X-Grvt-Account-Id")
 
             if not gravity_token or not account_id:
-                log.warning("GRVT auth failed: gravity=%r account_id=%r status=%s", gravity_token, account_id, resp.status_code)
+                # Capture exactly what came back so the real cause is visible in
+                # the deployment logs (status, content-type, which piece was
+                # missing, and a short body snippet). The login body on success
+                # is tiny JSON; on failure it's usually an error/HTML page.
+                content_type = resp.headers.get("Content-Type", "")
+                server = resp.headers.get("Server", "")
+                body_snippet = (resp.text or "")[:300]
+                log.warning(
+                    "GRVT auth failed: gravity=%s account_id=%s status=%s "
+                    "content_type=%r server=%r body=%r",
+                    "set" if gravity_token else "missing",
+                    "set" if account_id else "missing",
+                    resp.status_code,
+                    content_type,
+                    server,
+                    body_snippet,
+                )
                 self._fee_status = {
-                    "code":        "auth_failed",
-                    "http_status": resp.status_code,
-                    "message":     "Login did not return gravity session cookie or X-Grvt-Account-Id.",
+                    "code":         "auth_failed",
+                    "http_status":  resp.status_code,
+                    "content_type": content_type,
+                    "server":       server,
+                    "gravity":      "set" if gravity_token else "missing",
+                    "account_id":   "set" if account_id else "missing",
+                    "body_snippet": body_snippet,
+                    "message":      "Login did not return gravity session cookie or X-Grvt-Account-Id.",
                 }
                 return
 
@@ -139,11 +160,16 @@ class GRVTAPI:
                 timeout=15,
             )
             if fee_resp.status_code != 200:
-                log.warning("GRVT fee fetch failed: status=%s", fee_resp.status_code)
+                body_snippet = (fee_resp.text or "")[:300]
+                log.warning(
+                    "GRVT fee fetch failed: status=%s body=%r",
+                    fee_resp.status_code, body_snippet,
+                )
                 self._fee_status = {
-                    "code":        "fee_fetch_failed",
-                    "http_status": fee_resp.status_code,
-                    "message":     "funding_account_summary request failed.",
+                    "code":         "fee_fetch_failed",
+                    "http_status":  fee_resp.status_code,
+                    "body_snippet": body_snippet,
+                    "message":      "funding_account_summary request failed.",
                 }
                 return
 

@@ -24,6 +24,7 @@ from exchanges.ostium       import OstiumAPI
 from exchanges.extended     import ExtendedAPI
 from exchanges.edgex        import EdgeXAPI
 from exchanges.grvt         import GRVTAPI
+from exchanges.variational  import VariationalAPI
 
 
 class FeeComparator:
@@ -36,6 +37,7 @@ class FeeComparator:
         self.extended     = ExtendedAPI()
         self.edgex        = EdgeXAPI()
         self.grvt         = GRVTAPI()
+        self.variational  = VariationalAPI()
         self._warmup_done = threading.Event()
         threading.Thread(target=self._warmup, daemon=True, name="warmup").start()
 
@@ -163,6 +165,7 @@ class FeeComparator:
             'extended':      None,
             'edgex':         None,
             'grvt':          None,
+            'variational':   None,
             'symbols': {
                 'hyperliquid':  config.hyperliquid_symbol,
                 'lighter':      config.symbol_key if config.lighter_market_id else None,
@@ -172,6 +175,7 @@ class FeeComparator:
                 'extended':     config.extended_symbol,
                 'edgex':        (config.edgex_symbol or config.symbol_key) if config.edgex_contract_id else None,
                 'grvt':         config.grvt_instrument,
+                'variational':  self.variational.VARIATIONAL_SYMBOLS.get(asset_key.upper()),
             },
         }
 
@@ -248,8 +252,16 @@ class FeeComparator:
             )
             return 'grvt', r, grvt_dbg
 
+        def fetch_variational():
+            try:
+                r = self.variational.calculate_cost(asset_key, order_size_usd, is_long=is_long)
+                return 'variational', r
+            except Exception:
+                log.exception("Variational fetch error")
+                return 'variational', None
+
         tasks = [fetch_hyperliquid, fetch_lighter, fetch_aster, fetch_avantis,
-                 fetch_ostium, fetch_extended, fetch_edgex, fetch_grvt]
+                 fetch_ostium, fetch_extended, fetch_edgex, fetch_grvt, fetch_variational]
 
         with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
             futures = {executor.submit(fn): fn for fn in tasks}
@@ -341,9 +353,18 @@ class FeeComparator:
         if av:
             fee_structure['avantis'] = {'open': av.get('open_fee_bps', 0), 'close': av.get('close_fee_bps', 0)}
 
+        # Variational (Omni): use the live futures taker fee returned by the
+        # exchange module (0 today — Omni's cost is purely spread).
+        var_data = result.get('variational')
+        if var_data:
+            fee_structure['variational'] = {
+                'open':  var_data.get('open_fee_bps', 0.0),
+                'close': var_data.get('close_fee_bps', 0.0),
+            }
+
         # Standardize opening/closing slippage by direction
         is_long = (direction == 'long')
-        for name in ['hyperliquid', 'lighter', 'aster', 'ostium', 'extended', 'edgex', 'grvt']:
+        for name in ['hyperliquid', 'lighter', 'aster', 'ostium', 'extended', 'edgex', 'grvt', 'variational']:
             ex_data = result.get(name)
             if ex_data:
                 buy_slip  = round(ex_data.get('buy_slippage_bps',  0.0), 3)
@@ -353,7 +374,7 @@ class FeeComparator:
                 ex_data['slippage_type']         = 'opening_closing'
 
         # Calculate totals and collect for winner ranking
-        for name in ['hyperliquid', 'lighter', 'aster', 'avantis', 'ostium', 'extended', 'edgex', 'grvt']:
+        for name in ['hyperliquid', 'lighter', 'aster', 'avantis', 'ostium', 'extended', 'edgex', 'grvt', 'variational']:
             ex_data = result.get(name)
             if ex_data:
                 fees           = fee_structure.get(name, {'open': None, 'close': None})
