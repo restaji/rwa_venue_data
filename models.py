@@ -39,13 +39,14 @@ class AssetConfig:
     edgex_symbol: Optional[str] = None      # EdgeX display symbol override (if different from symbol_key)
     grvt_instrument: Optional[str] = None   # GRVT instrument name (e.g. XAU_USDT_Perp)
     extended_display_symbol: Optional[str] = None  # Extended display symbol override (if different from extended_symbol)
+    ondo_symbol: Optional[str] = None       # Ondo Perps market (e.g. NVDA-USD.P)
 
 
 ASSETS: Dict[str, AssetConfig] = {
     # Commodities                                                                                     
-    'XAU':    AssetConfig('XAU/USD',  'XAU',    'commodity', 'GOLD',   92,  'XAUUSDT',  'XAUUSD',  'XAU-USD',    10000234, 'XAUT',       'XAU_USDT_Perp'),
-    'XAG':    AssetConfig('XAG/USD',  'XAG',    'commodity', 'SILVER', 93,  'XAGUSDT',  'XAGUSD',  'XAG-USD',    10000278, 'SILVERUSDT', 'XAG_USDT_Perp'),
-    'WTI':    AssetConfig('WTI/USD',  'WTI',    'commodity', 'CL',           145, 'CLUSDT', 'CLUSD',     'WTI-USD', 10000283, 'CLUSD'),
+    'XAU':    AssetConfig('XAU/USD',  'XAU',    'commodity', 'GOLD',   92,  'XAUUSDT',  'XAUUSD',  'XAU-USD',    10000234, 'XAUT',       'XAU_USDT_Perp', ondo_symbol='XAU-USD.P'),
+    'XAG':    AssetConfig('XAG/USD',  'XAG',    'commodity', 'SILVER', 93,  'XAGUSDT',  'XAGUSD',  'XAG-USD',    10000278, 'SILVERUSDT', 'XAG_USDT_Perp', ondo_symbol='XAG-USD.P'),
+    'WTI':    AssetConfig('WTI/USD',  'WTI',    'commodity', 'CL',           145, 'CLUSDT', 'CLUSD',     'WTI-USD', 10000283, 'CLUSD', ondo_symbol='WTI-USD.P'),
     'BRENT':  AssetConfig('BRENT/USD','BRENT',  'commodity', 'BRENTOIL',     146, None,     'BRENTUSD',  'XBR-USD'),
 
     # Forex
@@ -54,20 +55,21 @@ ASSETS: Dict[str, AssetConfig] = {
     'USDJPY': AssetConfig('USD/JPY',  'USDJPY', 'forex',     'JPY',   98,  None,       'USDJPY',  'USDJPY-USD', None,     None,         None),
 
     # MAG7 Stocks                                                                                     
-    'AAPL':   AssetConfig('AAPL/USD', 'AAPL',   'stock',     'AAPL',  113, 'AAPLUSDT', 'AAPLUSD', None,         10000275),
-    'MSFT':   AssetConfig('MSFT/USD', 'MSFT',   'stock',     'MSFT',  115, 'MSFTUSDT', 'MSFTUSD', None,         None),
-    'GOOG':   AssetConfig('GOOG/USD', 'GOOG',   'stock',     'GOOGL', 116, 'GOOGUSDT', 'GOOGUSD', None,         10000280),
-    'AMZN':   AssetConfig('AMZN/USD', 'AMZN',   'stock',     'AMZN',  114, 'AMZNUSDT', 'AMZNUSD', None,         10000281, None, 'AMZN_USDT_Perp'),
-    'META':   AssetConfig('META/USD', 'META',   'stock',     'META',  117, 'METAUSDT', 'METAUSD', None,         10000290),
-    'NVDA':   AssetConfig('NVDA/USD', 'NVDA',   'stock',     'NVDA',  110, 'NVDAUSDT', 'NVDAUSD', None,         10000272),
-    'TSLA':   AssetConfig('TSLA/USD', 'TSLA',   'stock',     'TSLA',  112, 'TSLAUSDT', 'TSLAUSD', None,         10000273, None, 'TSLA_USDT_Perp'),
+    'AAPL':   AssetConfig('AAPL/USD', 'AAPL',   'stock',     'AAPL',  113, 'AAPLUSDT', 'AAPLUSD', None,         10000275, ondo_symbol='AAPL-USD.P'),
+    'MSFT':   AssetConfig('MSFT/USD', 'MSFT',   'stock',     'MSFT',  115, 'MSFTUSDT', 'MSFTUSD', None,         None,     ondo_symbol='MSFT-USD.P'),
+    'GOOG':   AssetConfig('GOOG/USD', 'GOOG',   'stock',     'GOOGL', 116, 'GOOGUSDT', 'GOOGUSD', None,         10000280, ondo_symbol='GOOGL-USD.P'),
+    'AMZN':   AssetConfig('AMZN/USD', 'AMZN',   'stock',     'AMZN',  114, 'AMZNUSDT', 'AMZNUSD', None,         10000281, None, 'AMZN_USDT_Perp', ondo_symbol='AMZN-USD.P'),
+    'META':   AssetConfig('META/USD', 'META',   'stock',     'META',  117, 'METAUSDT', 'METAUSD', None,         10000290, ondo_symbol='META-USD.P'),
+    'NVDA':   AssetConfig('NVDA/USD', 'NVDA',   'stock',     'NVDA',  110, 'NVDAUSDT', 'NVDAUSD', None,         10000272, ondo_symbol='NVDA-USD.P'),
+    'TSLA':   AssetConfig('TSLA/USD', 'TSLA',   'stock',     'TSLA',  112, 'TSLAUSDT', 'TSLAUSD', None,         10000273, None, 'TSLA_USDT_Perp', ondo_symbol='TSLA-USD.P'),
 
     # Indices
-    'SPY':    AssetConfig('SPY/USD',  'SPY',    'index',     'SP500',  128, None,       'SPXUSD',  'SPX500m-USD',    10000248, extended_display_symbol='SPX/USD'),
-    'QQQ':    AssetConfig('QQQ/USD',  'QQQ',    'index',     'XYZ100', 129, 'QQQUSDT',  'NDXUSD',  'TECH100m-USD', 10000249, extended_display_symbol='NDX/USD'),
+    'SPY':    AssetConfig('SPY/USD',  'SPY',    'index',     'SP500',  128, None,       'SPXUSD',  'SPX500m-USD',    10000248, extended_display_symbol='SPX/USD', ondo_symbol='SPY-USD.P'),
+    'QQQ':    AssetConfig('QQQ/USD',  'QQQ',    'index',     'XYZ100', 129, 'QQQUSDT',  'NDXUSD',  'TECH100m-USD', 10000249, extended_display_symbol='NDX/USD', ondo_symbol='QQQ-USD.P'),
 
     # Other
-    'COIN':   AssetConfig('COIN/USD', 'COIN',   'stock',     'COIN',  109, None,       'COINUSD', None,         10000274, None, 'COIN_USDT_Perp'),
+    'COIN':   AssetConfig('COIN/USD', 'COIN',   'stock',     'COIN',  109, None,       'COINUSD', None,         10000274, None, 'COIN_USDT_Perp', ondo_symbol='COIN-USD.P'),
+    'SPCX':   AssetConfig('SPCX/USD', 'SPCX',   'stock',     'SPCX',  None, 'SPCXUSDT', None,        'XYZSPCX_ORCLPX-USD', None, None, None, 'SPCX/USD', ondo_symbol='SPCX-USD.P'),
 }
 
 

@@ -9,6 +9,8 @@ from .ostium       import OstiumAPI
 from .extended     import ExtendedAPI
 from .edgex        import EdgeXAPI
 from .grvt         import GRVTAPI
+from .variational  import VariationalAPI
+from .ondo         import OndoAPI
 
 __all__ = [
     "HyperliquidAPI",
@@ -19,4 +21,6 @@ __all__ = [
     "ExtendedAPI",
     "EdgeXAPI",
     "GRVTAPI",
+    "VariationalAPI",
+    "OndoAPI",
 ]

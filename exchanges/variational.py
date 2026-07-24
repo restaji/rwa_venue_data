@@ -10,7 +10,8 @@ impersonation rather than a spoofed User-Agent):
   Quote:  POST https://omni.variational.io/api/quotes/simple
   Config: leverage table + taker fee parsed live from the app JS bundle
 
-Instruments are RWA commodity perps (XAU, XAG, WTI, BRENT) settled in USDC.
+Instruments are RWA perps (commodities, pre-IPO equity, listed equity, ETFs)
+settled in USDC.
 """
 from __future__ import annotations
 
@@ -35,10 +36,42 @@ class VariationalAPI:
     SETTLEMENT_ASSET = "USDC"
 
     VARIATIONAL_INSTRUMENTS: Dict[str, Dict] = {
-        "XAU":   {"underlying": "XAU", "instrument_type": "perpetual_rwa_future", "kind": "commodity"},  # Gold
-        "XAG":   {"underlying": "XAG", "instrument_type": "perpetual_rwa_future", "kind": "commodity"},  # Silver
-        "WTI":   {"underlying": "CL",  "instrument_type": "perpetual_rwa_future", "kind": "commodity"},  # WTI Crude
-        "BRENT": {"underlying": "BZ",  "instrument_type": "perpetual_rwa_future", "kind": "commodity"},  # Brent Crude
+        # Commodities
+        "XAU":    {"underlying": "XAU",    "instrument_type": "perpetual_rwa_future", "kind": "commodity"},  # Gold
+        "XAG":    {"underlying": "XAG",    "instrument_type": "perpetual_rwa_future", "kind": "commodity"},  # Silver
+        "WTI":    {"underlying": "CL",     "instrument_type": "perpetual_rwa_future", "kind": "commodity"},  # WTI Crude
+        "BRENT":  {"underlying": "BZ",     "instrument_type": "perpetual_rwa_future", "kind": "commodity"},  # Brent Crude
+        "NATGAS": {"underlying": "NATGAS", "instrument_type": "perpetual_rwa_future", "kind": "commodity"},  # Natural Gas
+        "COPPER": {"underlying": "COPPER", "instrument_type": "perpetual_rwa_future", "kind": "commodity"},  # Copper
+        # Pre-IPO / private equity
+        "SPCX":      {"underlying": "SPCX",      "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # SpaceX
+        "OPENAI":    {"underlying": "OPENAI",    "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # OpenAI
+        "ANTHROPIC": {"underlying": "ANTHROPIC", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Anthropic
+        "QNTX":      {"underlying": "QNTX",      "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Quantinuum
+        # Listed equity
+        "AMD":  {"underlying": "AMD",  "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Advanced Micro Devices
+        "CBRS": {"underlying": "CBRS", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Celsius Resources
+        "COIN": {"underlying": "COIN", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Coinbase
+        "CRCL": {"underlying": "CRCL", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Circle
+        "INTC": {"underlying": "INTC", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Intel
+        "LITE": {"underlying": "LITE", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Lumentum
+        "MRVL": {"underlying": "MRVL", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Marvell
+        "MSTR": {"underlying": "MSTR", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # MicroStrategy
+        "MU":   {"underlying": "MU",   "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Micron
+        "NVDA": {"underlying": "NVDA", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # NVIDIA
+        "QCOM": {"underlying": "QCOM", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Qualcomm
+        "RKLB": {"underlying": "RKLB", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Rocket Lab
+        "SNDK": {"underlying": "SNDK", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Sandisk
+        "TSLA": {"underlying": "TSLA", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Tesla
+        "TSM":  {"underlying": "TSM",  "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # TSMC
+        "USAR": {"underlying": "USAR", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # USA Rare Earth
+        # ETFs
+        "QQQ":  {"underlying": "QQQ",   "instrument_type": "perpetual_rwa_future", "kind": "ETF"},  # Nasdaq-100 ETF
+        "SPY":  {"underlying": "US500", "instrument_type": "perpetual_rwa_future", "kind": "ETF"},  # S&P 500 ETF (Variational ticker: US500)
+        "DRAM": {"underlying": "DRAM",  "instrument_type": "perpetual_rwa_future", "kind": "ETF"},  # Dynamic Random Access Memory ETF
+        "EWJ":  {"underlying": "EWJ",   "instrument_type": "perpetual_rwa_future", "kind": "ETF"},  # iShares MSCI Japan ETF
+        "EWY":  {"underlying": "EWY",   "instrument_type": "perpetual_rwa_future", "kind": "ETF"},  # iShares MSCI South Korea ETF
+        "SOXL": {"underlying": "SOXL",  "instrument_type": "perpetual_rwa_future", "kind": "ETF"},  # Direxion Daily Semiconductor Bull 3X
     }
 
     # asset_key -> Variational's own ticker, shown in the comparator. Populated
@@ -114,49 +147,92 @@ class VariationalAPI:
                 return local, urljoin(current_url, m.group(2))
         return None, None
 
-    def _parse_leverage(self, text: str, url: str) -> Optional[Dict]:
-        """Extract the crypto-default + per-equity max-leverage map from one
-        module's source, or None if this module doesn't hold it."""
-        m = re.search(r"r\.max_leverage;if\(t\)return t\}return (\w+)\}", text)
+    # Sub-patterns for walking minified object/array literals. ``_INNER`` is the
+    # body of a single object (permitting ``${...}`` template substitutions),
+    # ``_OBJ`` a whole ``{...}`` object, and ``_ARR`` an array that may itself
+    # contain such objects (one level deep — enough for the tradfi tables).
+    _INNER = r'(?:[^{}]|\$\{[^}]*\})*'
+    _OBJ   = r'\{' + _INNER + r'\}'
+    _ARR   = r'\[(?:[^\[\]{}]|\$\{[^}]*\}|' + _OBJ + r')*\]'
+
+    @classmethod
+    def _parse_equity(cls, text: str) -> Dict[str, float]:
+        equity: Dict[str, float] = {}
+
+        # ``Ge``'s default leverage, applied to any bare-string ticker.
+        gm = re.search(
+            r'typeof \w+=="string"\)return\[\w+,\{' + cls._INNER + r'max_leverage:"(\d+)"',
+            text,
+        )
+        ge_default = float(gm.group(1)) if gm else None
+
+        # Each array fed to ``Ge``, e.g. ``...Ge(Xa,"etf","svg")``.
+        for var in re.findall(r'\.\.\.\w+\((\w+),"[a-z]+","[a-z]+"\)', text):
+            am = re.search(re.escape(var) + r'=(' + cls._ARR + r')', text)
+            if not am:
+                continue
+            content = am.group(1)
+            # Objects: explicit symbol, with an optional per-symbol override.
+            for om in re.finditer(cls._OBJ, content):
+                obj = om.group(0)
+                sm = re.search(r'symbol:"([^"]+)"', obj)
+                if not sm:
+                    continue
+                lm = re.search(r'max_leverage:"(\d+)"', obj)
+                if lm:
+                    equity[sm.group(1).upper()] = float(lm.group(1))
+                elif ge_default is not None:
+                    equity[sm.group(1).upper()] = ge_default
+            # Remaining bare "TICKER" strings inherit Ge's default.
+            if ge_default is not None:
+                for bm in re.finditer(r'"([^"]+)"', re.sub(cls._OBJ, '', content)):
+                    equity.setdefault(bm.group(1).upper(), ge_default)
+
+        # Legacy fallback: standalone ``TICKER:{name:"…",max_leverage:"N"}`` shape.
+        for em in re.finditer(r'(\w+):\{name:"[^"]*"' + cls._INNER + r'max_leverage:"(\d+)"', text):
+            equity.setdefault(em.group(1).upper(), float(em.group(2)))
+
+        return equity
+
+    def _parse_crypto_default(self, text: str, url: str) -> Optional[float]:
+        """Extract the crypto-default max leverage from one module's source, or
+        None if this module doesn't hold it."""
+        # Minified shape (var names drift across redeploys):
+        #   <x>.max_leverage;if(<v>)return <v>}return <default>}
+        m = re.search(r"\w+\.max_leverage;if\((\w+)\)return \1\}return (\w+)\}", text)
         if not m:
             return None
-        default_var = m.group(1)
+        default_var = m.group(2)
 
-        equity: Dict[str, float] = {}
-        for em in re.finditer(r'(\w+):\{name:"[^"]*"[\s\S]*?max_leverage:"(\d+)"', text):
-            equity[em.group(1).upper()] = float(em.group(2))
-
-        crypto = None
         loc = re.search(re.escape(default_var) + r'="?(\d+(?:\.\d+)?)"?', text)
         if loc:
-            crypto = float(loc.group(1))
-        else:
-            exp_name, src_url = self._find_import_source(text, default_var, url)
-            if src_url:
-                st = self._get(src_url)
-                localname = self._find_export_local(st, exp_name)
-                if localname:
-                    vm = re.search(re.escape(localname) + r'="?(\d+(?:\.\d+)?)"?', st)
-                    if vm:
-                        crypto = float(vm.group(1))
+            return float(loc.group(1))
 
-        if crypto is None:
-            return None
-        return {"crypto_default": crypto, "equity": equity}
+        exp_name, src_url = self._find_import_source(text, default_var, url)
+        if src_url:
+            st = self._get(src_url)
+            localname = self._find_export_local(st, exp_name)
+            if localname:
+                vm = re.search(re.escape(localname) + r'="?(\d+(?:\.\d+)?)"?', st)
+                if vm:
+                    return float(vm.group(1))
+        return None
 
     def get_app_config(self) -> Dict:
         """Walk the JS module graph from the page entry points and extract the
         live app config: the max-leverage table (crypto default + per-equity
         map) and the futures taker fee. Discovered dynamically so it survives
-        redeploys; the two values live in different modules so we keep crawling
-        until both are found."""
+        redeploys. The three values live in different modules, and the equity
+        table is merged across every module we visit, so we keep crawling until
+        the crypto default and taker fee are found and we've collected equities."""
         html = self._get(f"{self.BASE}/perpetual/XAU")
         entries = re.findall(r"/_app/immutable/entry/[A-Za-z0-9_.-]+\.js", html)
 
         seen = set()
         queue = collections.deque(self.BASE + e for e in entries)
 
-        leverage: Optional[Dict] = None
+        crypto_default: Optional[float] = None
+        equity: Dict[str, float] = {}
         taker_fee_bps: Optional[float] = None
 
         while queue and len(seen) < 400:
@@ -169,8 +245,11 @@ class VariationalAPI:
             except Exception:
                 continue
 
-            if leverage is None:
-                leverage = self._parse_leverage(text, url)
+            for ticker, lev in self._parse_equity(text).items():
+                equity.setdefault(ticker, lev)
+
+            if crypto_default is None:
+                crypto_default = self._parse_crypto_default(text, url)
 
             if taker_fee_bps is None:
                 fm = re.search(r'futures_taker_fee:"?(\d+(?:\.\d+)?)"?', text)
@@ -179,18 +258,18 @@ class VariationalAPI:
                     # bps); convert to bps. Currently 0 on Omni (spread-only).
                     taker_fee_bps = float(fm.group(1)) * 10000.0
 
-            if leverage is not None and taker_fee_bps is not None:
+            if crypto_default is not None and taker_fee_bps is not None and equity:
                 break
 
             for rel in self._IMPORT_RE.findall(text):
                 queue.append(urljoin(url, rel))
 
-        if leverage is None and taker_fee_bps is None:
+        if crypto_default is None and taker_fee_bps is None and not equity:
             raise RuntimeError("could not locate app config in the bundle")
 
         return {
-            "crypto_default": leverage["crypto_default"] if leverage else None,
-            "equity":         leverage["equity"] if leverage else {},
+            "crypto_default": crypto_default,
+            "equity":         equity,
             "taker_fee_bps":  taker_fee_bps,
         }
 
@@ -213,7 +292,10 @@ class VariationalAPI:
         cfg = self.get_app_config_cached()
         if not cfg or cfg.get("crypto_default") is None:
             return None
-        return cfg["equity"].get(underlying.upper(), cfg["crypto_default"])
+        # Resolve our asset key to Variational's own ticker (e.g. SPY -> US500)
+        # so equity-table lookups hit, mirroring ``calculate_cost``.
+        symbol = self._display_symbol(underlying)
+        return cfg["equity"].get(symbol.upper(), cfg["crypto_default"])
 
     def taker_fee_bps(self) -> Optional[float]:
         """Live futures taker fee (bps) parsed from the app config, or None if
@@ -315,10 +397,6 @@ class VariationalAPI:
         opening_slip = buy_slip_bps  if is_long else sell_slip_bps
         closing_slip = sell_slip_bps if is_long else buy_slip_bps
 
-        # Live app config: max leverage + futures taker fee. The fee is charged
-        # on both open and close; you always take against the OLP, so there's no
-        # maker side. Fall back to 0.0 (Omni's documented spread-only model) if
-        # the config can't be parsed, so the venue still ranks.
         cfg = self.get_app_config_cached() or {}
         max_lev = (
             cfg["equity"].get(display.upper(), cfg["crypto_default"])
@@ -326,7 +404,8 @@ class VariationalAPI:
         )
         fee_bps = cfg.get("taker_fee_bps")
         if fee_bps is None:
-            fee_bps = 0.0
+            log.warning("Variational: taker fee unavailable for %s — skipping venue", display)
+            return None
 
         # Round-trip cost = full spread + open fee + close fee.
         total_cost_bps = buy_slip_bps + sell_slip_bps + 2.0 * fee_bps

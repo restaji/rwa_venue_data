@@ -45,6 +45,7 @@ class AsterAPI:
         "HOOD":   "HOODUSDT",
         "SPY":    "SPYUSDT",
         "QQQ":    "QQQUSDT",
+        "SPCX":   "SPCXUSDT",
     }
 
     FEE_FAIL_TTL = 60  # seconds before retrying a failed fee lookup
@@ -132,9 +133,8 @@ class AsterAPI:
             maker_rate = float(response.get('makerCommissionRate', 0))
             taker_rate = float(response.get('takerCommissionRate', 0))
 
-            # Doubles applied: taker fill on Aster matches Hyperliquid/Extended convention
-            taker_bps = taker_rate * 10000 * 2
-            maker_bps = maker_rate * 10000 * 2
+            taker_bps = taker_rate * 10000 
+            maker_bps = maker_rate * 10000 
 
             self.fee_cache[symbol] = {'taker_fee_bps': taker_bps, 'maker_fee_bps': maker_bps}
             return (taker_bps, maker_bps)

@@ -62,6 +62,11 @@ class GRVTAPI:
         self._fee_status: Dict[str, Any] = {"code": "pending", "message": "Fee load not finished yet."}
         # Last orderbook failure (per fetch)
         self._last_orderbook_debug: Dict[str, Any] = {}
+        # Guards against concurrent/duplicate re-auth attempts (background
+        # retry thread + on-demand retry from calculate_execution_cost)
+        self._auth_lock = threading.Lock()
+        self._last_auth_attempt_ts: float = 0.0
+        self._AUTH_RETRY_COOLDOWN_SEC = 30
 
         self._load_instrument_meta()
         self._authenticate_and_load_fees()
@@ -196,20 +201,47 @@ class GRVTAPI:
                 "message": "Exception during GRVT login or fee fetch; see server logs.",
             }
 
+    def _try_reauth_if_stale(self) -> None:
+        """
+        Best-effort synchronous re-auth, throttled to once per
+        ``_AUTH_RETRY_COOLDOWN_SEC``. Lets a live request self-heal GRVT
+        immediately (instead of waiting on the background retry thread's
+        next scheduled attempt), without every concurrent request hammering
+        the login endpoint.
+        """
+        now = time.time()
+        if now - self._last_auth_attempt_ts < self._AUTH_RETRY_COOLDOWN_SEC:
+            return
+        if not self._auth_lock.acquire(blocking=False):
+            return
+        try:
+            self._last_auth_attempt_ts = time.time()
+            self._authenticate_and_load_fees()
+        finally:
+            self._auth_lock.release()
+
     def _start_auth_retry(self) -> None:
-        """Retry authentication in a background thread after startup failure."""
         def _retry():
-            for delay in [5, 15, 30, 60]:
+            backoff = [5, 15, 30, 60]
+            attempt = 0
+            while self._taker_fee_bps is None:
+                delay = backoff[min(attempt, len(backoff) - 1)]
                 time.sleep(delay)
-                self._authenticate_and_load_fees()
+                attempt += 1
+                with self._auth_lock:
+                    self._last_auth_attempt_ts = time.time()
+                    self._authenticate_and_load_fees()
                 if self._taker_fee_bps is not None:
-                    log.info("GRVT auth succeeded on retry (delay=%ds)", delay)
+                    log.info("GRVT auth succeeded on retry (attempt=%d, delay=%ds)", attempt, delay)
                     return
-            log.warning("GRVT auth failed after all retries — GRVT results will be skipped")
+                log.warning(
+                    "GRVT auth retry %d failed (code=%s) — retrying in %ds",
+                    attempt, self._fee_status.get("code"), backoff[min(attempt, len(backoff) - 1)],
+                )
 
         t = threading.Thread(target=_retry, daemon=True, name="grvt-auth-retry")
         t.start()
-        log.info("GRVT auth retry scheduled in background")
+        log.info("GRVT auth retry scheduled in background (indefinite, capped at 60s cadence)")
 
     def _load_instrument_meta(self) -> None:
         """Load funding_interval_hours for all active perpetuals at startup."""
@@ -360,6 +392,9 @@ class GRVTAPI:
                 "code":    "no_api_key",
                 "message": "GRVT_API_KEY is not set in the environment.",
             }
+
+        if self._taker_fee_bps is None:
+            self._try_reauth_if_stale()
 
         if self._taker_fee_bps is None:
             dbg = dict(self._fee_status) if self._fee_status else {"code": "fees_unknown"}

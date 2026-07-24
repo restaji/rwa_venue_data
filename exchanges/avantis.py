@@ -25,12 +25,19 @@ class AvantisAPI:
     RISK_API     = "https://risk-api.avantisfi.com/v2/dynamic-spread"  # SpreadController_getSpreadV2
     DUMMY_TRADER = "0x1234567890123456789012345678901234567890"
 
+    # Partial-fill search: when a full-size quote is unavailable, binary-search
+    # for the largest quotable size. Caps API round-trips and stops once the
+    # bracket is within tolerance (fraction of requested size).
+    _MAX_SPREAD_SEARCH_ITERS = 8
+    _SPREAD_SEARCH_TOL       = 0.02
+
     PAIRS = {
         "XAU": 21, "XAG": 20, "WTI": 96, "BRENT": 97,  
         "EURUSD": 11, "GBPUSD": 13, "USDJPY": 12,
         "SPY": 78, "QQQ": 79,
         "NVDA": 81, "TSLA": 86, "AAPL": 82, "MSFT": 84,
         "AMZN": 83, "GOOG": 87, "META": 85, "COIN": 80, "HOOD": 91,
+        "SPCX": 92
     }
 
     def __init__(self):
@@ -169,19 +176,36 @@ class AvantisAPI:
         spread_bps, spread_meta = self._get_spread(pair_idx, pair_info, position_size, is_long=is_long)
 
         if spread_bps is None:
-            fallback_base = liq_cap if liq_cap not in (float('inf'), 0) else position_size
-            for pct in (1.0, 0.90, 0.75, 0.50):
-                retry_size = fallback_base * pct
-                if retry_size <= 0 or retry_size == position_size:
-                    continue
-                spread_bps, spread_meta = self._get_spread(pair_idx, pair_info, retry_size, is_long=is_long)
-                if spread_bps is not None:
-                    position_size = retry_size
-                    filled_usd    = retry_size
-                    unfilled_usd  = max(0, order_size_usd - retry_size)
-                    filled        = False
-                    open_fee_bps  = self._calculate_opening_fee(pair_info, position_size, is_long=is_long)
+            # The dynamic-spread Risk API refuses to quote sizes above the pair's
+            # true fillable liquidity, which can be far below the OI-based cap
+            # (e.g. BRENT quotes up to ~$1.4M despite an ~$8.7M OI cap). A fixed
+            # percentage ladder off the cap can miss this entirely, so binary-search
+            # for the largest size the API will actually quote and report it as a
+            # partial fill. Assumes quotability is monotonic (quotes below a
+            # threshold, null above), which matches observed API behaviour.
+            hi          = position_size   # known to return null
+            lo          = 0.0             # assumed quotable floor
+            best_size   = None
+            best_spread = None
+            best_meta   = spread_meta
+            for _ in range(self._MAX_SPREAD_SEARCH_ITERS):
+                mid = (lo + hi) / 2
+                if mid <= 0 or (hi - lo) / position_size < self._SPREAD_SEARCH_TOL:
                     break
+                probe_bps, probe_meta = self._get_spread(pair_idx, pair_info, mid, is_long=is_long)
+                if probe_bps is not None:
+                    lo, best_size, best_spread, best_meta = mid, mid, probe_bps, probe_meta
+                else:
+                    hi = mid
+
+            if best_size is not None:
+                position_size = best_size
+                filled_usd    = min(order_size_usd, best_size)
+                unfilled_usd  = max(0, order_size_usd - best_size)
+                filled        = False
+                spread_bps    = best_spread
+                spread_meta   = best_meta
+                open_fee_bps  = self._calculate_opening_fee(pair_info, position_size, is_long=is_long)
 
         if spread_bps is None:
             filled = False

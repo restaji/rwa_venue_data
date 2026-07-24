@@ -67,7 +67,7 @@ Buy side walks asks (lowest first); sell side walks bids (highest first). Averag
 | Endpoint | `GET /fapi/v1/depth?symbol=<sym>&limit=1000` |
 | Format | `bids[][0]` = price, `bids[][1]` = qty |
 | Fees | Authenticated `/commissionRate` (`ASTER_API_KEY` + `ASTER_SECRET_KEY`) |
-| Fee convention | `takerCommissionRate × 10000 × 2` bps |
+| Fee convention | `takerCommissionRate × 10000` bps (per-leg; charged once on open, once on close — no extra doubling) |
 | Max leverage | Max key in `leverageOiRemainingMap` |
 | Funding | 4H rate `/real-time-funding-rate` → ÷4 for 1H, ×6 for 24H |
 
@@ -246,4 +246,5 @@ python app.py          # starts on port 5001 (override: PORT env var)
 | `ASTER_API_KEY` | Aster fee fetching |
 | `ASTER_SECRET_KEY` | Aster fee fetching |
 | `EXTENDED_API_KEY` | Extended orderbook + fees |
+| `ONDO_API_KEY` | Ondo Perps markets (fees + leverage) + depth |
 | `PORT` | Server port (default `5001`) |
