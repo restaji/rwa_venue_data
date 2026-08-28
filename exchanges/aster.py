@@ -18,7 +18,7 @@ from urllib.parse import urlencode
 
 import requests
 
-from models import StandardizedOrderbook, ExecutionCalculator
+from models import StandardizedOrderbook, ExecutionCalculator, floor_leverage
 
 log = logging.getLogger(__name__)
 
@@ -43,8 +43,8 @@ class AsterAPI:
         "GOOG":   "GOOGUSDT",
         "META":   "METAUSDT",
         "HOOD":   "HOODUSDT",
-        "SPY":    "SPYUSDT",
-        "QQQ":    "QQQUSDT",
+        "US500":  "SPYUSDT",
+        "US100":  "QQQUSDT",
         "SPCX":   "SPCXUSDT",
     }
 
@@ -173,8 +173,8 @@ class AsterAPI:
         return None
 
     def get_max_leverage(self, symbol: str) -> Optional[int]:
-        """Get max leverage for a symbol from API."""
-        return self._fetch_max_leverage(symbol)
+        """Get max leverage for a symbol from API, floored to a whole number."""
+        return floor_leverage(self._fetch_max_leverage(symbol))
 
     # ------------------------------------------------------------------
     # Funding fee

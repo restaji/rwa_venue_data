@@ -24,7 +24,7 @@ from typing import Dict, Optional, Tuple
 
 import requests
 
-from models import StandardizedOrderbook, ExecutionCalculator
+from models import StandardizedOrderbook, ExecutionCalculator, floor_leverage
 
 log = logging.getLogger(__name__)
 
@@ -72,9 +72,8 @@ class OndoAPI:
                 margin_info = m.get("marginInfo") or []
                 max_lev = None
                 for bracket in margin_info:
-                    try:
-                        lev = float(bracket.get("maxLeverage"))
-                    except (TypeError, ValueError):
+                    lev = floor_leverage(bracket.get("maxLeverage"))
+                    if lev is None:
                         continue
                     if max_lev is None or lev > max_lev:
                         max_lev = lev
@@ -108,10 +107,10 @@ class OndoAPI:
     # ------------------------------------------------------------------
     # Max leverage
     # ------------------------------------------------------------------
-    def get_max_leverage(self, market: str) -> Optional[float]:
-        """Max leverage from the markets marginInfo bracket table."""
+    def get_max_leverage(self, market: str) -> Optional[int]:
+        """Max leverage from the markets marginInfo bracket table, floored."""
         meta = self._market_meta(market)
-        return meta.get("max_leverage") if meta else None
+        return floor_leverage(meta.get("max_leverage") if meta else None)
 
     # ------------------------------------------------------------------
     # Orderbook

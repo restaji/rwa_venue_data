@@ -11,6 +11,7 @@ from .edgex        import EdgeXAPI
 from .grvt         import GRVTAPI
 from .variational  import VariationalAPI
 from .ondo         import OndoAPI
+from .pacifica     import PacificaAPI
 
 __all__ = [
     "HyperliquidAPI",
@@ -23,4 +24,5 @@ __all__ = [
     "GRVTAPI",
     "VariationalAPI",
     "OndoAPI",
+    "PacificaAPI",
 ]

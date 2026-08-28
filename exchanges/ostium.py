@@ -14,7 +14,7 @@ from typing import Dict, Optional, Tuple
 
 import requests
 
-from models import StandardizedOrderbook, ExecutionCalculator
+from models import StandardizedOrderbook, ExecutionCalculator, floor_leverage
 
 log = logging.getLogger(__name__)
 
@@ -216,7 +216,7 @@ class OstiumAPI:
                             cache[symbol] = {
                                 'fee_bps':                      taker_fee_bps,
                                 'maker_fee_bps':                maker_fee_bps if maker_fee_bps is not None else 0.0,
-                                'max_leverage':                 float(max_lev) if max_lev is not None else None,
+                                'max_leverage':                 floor_leverage(max_lev),
                                 'price_impact_k':               price_impact_k,
                                 'decay_rate':                   decay_rate,
                                 'buy_volume':                   buy_volume,
@@ -277,11 +277,11 @@ class OstiumAPI:
         data = self.metadata_cache.get(ostium_symbol)
         return data.get('maker_fee_bps') if data else None
 
-    def get_max_leverage(self, ostium_symbol: str) -> Optional[float]:
-        """Get max leverage."""
+    def get_max_leverage(self, ostium_symbol: str) -> Optional[int]:
+        """Get max leverage, floored to a whole number."""
         self._ensure_metadata_fresh()
         data = self.metadata_cache.get(ostium_symbol)
-        return data.get('max_leverage') if data else None
+        return floor_leverage(data.get('max_leverage') if data else None)
 
     # ------------------------------------------------------------------
     # Rollover / margin fee  (confirmed formula via lastRolloverLongPure)

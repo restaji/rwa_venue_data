@@ -7,8 +7,10 @@ max leverage. Oracle/quote-based RWA perps – no traditional orderbook.
 
 Public APIs used (Cloudflare-fronted, accessed via curl_cffi Chrome TLS
 impersonation rather than a spoofed User-Agent):
-  Quote:  POST https://omni.variational.io/api/quotes/simple
-  Config: leverage table + taker fee parsed live from the app JS bundle
+  Quote:   POST https://omni.variational.io/api/quotes/simple
+  Assets:  GET  https://omni.variational.io/api/metadata/supported_assets
+  Config:  GET  https://omni.variational.io/api/metadata/config  (taker fee)
+           plus the app JS bundle for the UI's max-leverage helper
 
 Instruments are RWA perps (commodities, pre-IPO equity, listed equity, ETFs)
 settled in USDC.
@@ -19,10 +21,12 @@ import collections
 import logging
 import re
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 from urllib.parse import urljoin
 
 from curl_cffi import requests  # type: ignore[import-not-found]
+
+from models import floor_leverage
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +36,8 @@ class VariationalAPI:
 
     BASE = "https://omni.variational.io"
     QUOTE_URL = f"{BASE}/api/quotes/simple"
+    SUPPORTED_ASSETS_URL = f"{BASE}/api/metadata/supported_assets"
+    CONFIG_URL = f"{BASE}/api/metadata/config"
     IMPERSONATE = "chrome"
     SETTLEMENT_ASSET = "USDC"
 
@@ -66,8 +72,8 @@ class VariationalAPI:
         "TSM":  {"underlying": "TSM",  "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # TSMC
         "USAR": {"underlying": "USAR", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # USA Rare Earth
         # ETFs
-        "QQQ":  {"underlying": "QQQ",   "instrument_type": "perpetual_rwa_future", "kind": "ETF"},  # Nasdaq-100 ETF
-        "SPY":  {"underlying": "US500", "instrument_type": "perpetual_rwa_future", "kind": "ETF"},  # S&P 500 ETF (Variational ticker: US500)
+        "US100": {"underlying": "QQQ",   "instrument_type": "perpetual_rwa_future", "kind": "ETF"},  # Nasdaq-100 (Variational ticker: QQQ)
+        "US500": {"underlying": "US500", "instrument_type": "perpetual_rwa_future", "kind": "ETF"},  # S&P 500
         "DRAM": {"underlying": "DRAM",  "instrument_type": "perpetual_rwa_future", "kind": "ETF"},  # Dynamic Random Access Memory ETF
         "EWJ":  {"underlying": "EWJ",   "instrument_type": "perpetual_rwa_future", "kind": "ETF"},  # iShares MSCI Japan ETF
         "EWY":  {"underlying": "EWY",   "instrument_type": "perpetual_rwa_future", "kind": "ETF"},  # iShares MSCI South Korea ETF
@@ -93,13 +99,26 @@ class VariationalAPI:
     # Low-level HTTP (Chrome TLS impersonation)
     # ------------------------------------------------------------------
 
-    def _headers(self, underlying: str) -> dict:
+    def _headers(self, underlying: str = "XAU") -> dict:
         return {"origin": self.BASE, "referer": f"{self.BASE}/perpetual/{underlying}"}
 
     def _get(self, url: str, underlying: str = "XAU") -> str:
         return requests.get(
             url, impersonate=self.IMPERSONATE, timeout=20, headers=self._headers(underlying)
         ).text
+
+    def _get_json(self, url: str, underlying: str = "XAU") -> Optional[Dict]:
+        try:
+            r = requests.get(
+                url, impersonate=self.IMPERSONATE, timeout=20, headers=self._headers(underlying)
+            )
+            if r.status_code != 200:
+                log.warning("Variational: GET %s failed HTTP %s", url, r.status_code)
+                return None
+            return r.json()
+        except Exception:
+            log.exception("Variational: GET %s error", url)
+            return None
 
     def fetch_quote(self, asset_key: str, qty) -> Optional[Dict]:
         """POST a single size-adjusted quote for ``asset_key`` at ``qty`` base
@@ -194,21 +213,13 @@ class VariationalAPI:
 
         return equity
 
-    def _parse_crypto_default(self, text: str, url: str) -> Optional[float]:
-        """Extract the crypto-default max leverage from one module's source, or
-        None if this module doesn't hold it."""
-        # Minified shape (var names drift across redeploys):
-        #   <x>.max_leverage;if(<v>)return <v>}return <default>}
-        m = re.search(r"\w+\.max_leverage;if\((\w+)\)return \1\}return (\w+)\}", text)
-        if not m:
-            return None
-        default_var = m.group(2)
-
-        loc = re.search(re.escape(default_var) + r'="?(\d+(?:\.\d+)?)"?', text)
+    def _resolve_numeric_const(self, text: str, var: str, url: str) -> Optional[float]:
+        """Resolve a minified identifier to a numeric literal, following a
+        single import hop when the constant lives in another chunk."""
+        loc = re.search(re.escape(var) + r'="?(\d+(?:\.\d+)?)"?', text)
         if loc:
             return float(loc.group(1))
-
-        exp_name, src_url = self._find_import_source(text, default_var, url)
+        exp_name, src_url = self._find_import_source(text, var, url)
         if src_url:
             st = self._get(src_url)
             localname = self._find_export_local(st, exp_name)
@@ -218,13 +229,75 @@ class VariationalAPI:
                     return float(vm.group(1))
         return None
 
+    def _parse_leverage_defaults(
+        self, text: str, url: str
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """Extract (tradfi_default, crypto_default) from the UI's max-leverage
+        helper in this module, or (None, None) if it isn't here.
+
+        Current Omni helper (var names drift across redeploys)::
+
+            <t>.max_leverage;if(<r>)return <r>}return <e>&&<ts>(<e>)?<Lr>:<Fr>}
+
+        ``ts(e)`` is ``!!e.asset_class`` — any RWA with an asset_class (equity,
+        commodity, ETF, …) gets the tradfi cap; crypto perps get the default.
+        """
+        m = re.search(
+            r"\w+\.max_leverage;if\((\w+)\)return \1\}return \w+&&\w+\(\w+\)\?(\w+):(\w+)\}",
+            text,
+        )
+        if m:
+            tradfi = self._resolve_numeric_const(text, m.group(2), url)
+            crypto = self._resolve_numeric_const(text, m.group(3), url)
+            return tradfi, crypto
+
+        # Legacy: <x>.max_leverage;if(<v>)return <v>}return <default>}
+        m = re.search(r"\w+\.max_leverage;if\((\w+)\)return \1\}return (\w+)\}", text)
+        if m:
+            return None, self._resolve_numeric_const(text, m.group(2), url)
+        return None, None
+
+    def _fetch_asset_class_map(self) -> Dict[str, str]:
+        """Ticker → asset_class for RWAs (equity/commodity/etf). Crypto perps
+        omit the field; the UI treats a truthy asset_class as tradfi leverage."""
+        data = self._get_json(self.SUPPORTED_ASSETS_URL) or {}
+        out: Dict[str, str] = {}
+        for ticker, recs in data.items():
+            rec = recs[0] if isinstance(recs, list) and recs else recs
+            if isinstance(rec, dict) and rec.get("asset_class"):
+                out[str(ticker).upper()] = str(rec["asset_class"])
+        return out
+
+    def _fetch_taker_fee_bps(self) -> Optional[float]:
+        data = self._get_json(self.CONFIG_URL) or {}
+        raw = data.get("futures_taker_fee")
+        if raw is None:
+            return None
+        try:
+            return float(raw) * 10000.0
+        except (TypeError, ValueError):
+            return None
+
+    def _is_rwa_underlying(self, symbol: str) -> bool:
+        """True if ``symbol`` is one of our known RWA underlyings (all of
+        VARIATIONAL_INSTRUMENTS). Used when the supported-assets API is down."""
+        s = symbol.upper()
+        if s in self.VARIATIONAL_INSTRUMENTS:
+            return True
+        return any(spec["underlying"].upper() == s for spec in self.VARIATIONAL_INSTRUMENTS.values())
+
     def get_app_config(self) -> Dict:
-        """Walk the JS module graph from the page entry points and extract the
-        live app config: the max-leverage table (crypto default + per-equity
-        map) and the futures taker fee. Discovered dynamically so it survives
-        redeploys. The three values live in different modules, and the equity
-        table is merged across every module we visit, so we keep crawling until
-        the crypto default and taker fee are found and we've collected equities."""
+        """Live app config matching the Omni UI's max-leverage helper:
+
+        * per-symbol ``max_leverage`` override from the tradfi table (rare)
+        * otherwise tradfi cap if the market has ``asset_class``, else crypto default
+        * futures taker fee from ``/api/metadata/config`` (JS bundle as fallback)
+
+        Defaults are discovered from the JS bundle so they survive redeploys.
+        """
+        taker_fee_bps = self._fetch_taker_fee_bps()
+        asset_class = self._fetch_asset_class_map()
+
         html = self._get(f"{self.BASE}/perpetual/XAU")
         entries = re.findall(r"/_app/immutable/entry/[A-Za-z0-9_.-]+\.js", html)
 
@@ -232,8 +305,8 @@ class VariationalAPI:
         queue = collections.deque(self.BASE + e for e in entries)
 
         crypto_default: Optional[float] = None
+        tradfi_default: Optional[float] = None
         equity: Dict[str, float] = {}
-        taker_fee_bps: Optional[float] = None
 
         while queue and len(seen) < 400:
             url = queue.popleft()
@@ -248,8 +321,12 @@ class VariationalAPI:
             for ticker, lev in self._parse_equity(text).items():
                 equity.setdefault(ticker, lev)
 
-            if crypto_default is None:
-                crypto_default = self._parse_crypto_default(text, url)
+            if crypto_default is None or tradfi_default is None:
+                parsed_tradfi, parsed_crypto = self._parse_leverage_defaults(text, url)
+                if tradfi_default is None and parsed_tradfi is not None:
+                    tradfi_default = parsed_tradfi
+                if crypto_default is None and parsed_crypto is not None:
+                    crypto_default = parsed_crypto
 
             if taker_fee_bps is None:
                 fm = re.search(r'futures_taker_fee:"?(\d+(?:\.\d+)?)"?', text)
@@ -258,18 +335,28 @@ class VariationalAPI:
                     # bps); convert to bps. Currently 0 on Omni (spread-only).
                     taker_fee_bps = float(fm.group(1)) * 10000.0
 
-            if crypto_default is not None and taker_fee_bps is not None and equity:
+            have_defaults = crypto_default is not None and (
+                tradfi_default is not None or equity
+            )
+            if have_defaults and taker_fee_bps is not None:
                 break
 
             for rel in self._IMPORT_RE.findall(text):
                 queue.append(urljoin(url, rel))
 
-        if crypto_default is None and taker_fee_bps is None and not equity:
+        if (
+            crypto_default is None
+            and tradfi_default is None
+            and taker_fee_bps is None
+            and not equity
+        ):
             raise RuntimeError("could not locate app config in the bundle")
 
         return {
             "crypto_default": crypto_default,
+            "tradfi_default": tradfi_default,
             "equity":         equity,
+            "asset_class":    asset_class,
             "taker_fee_bps":  taker_fee_bps,
         }
 
@@ -285,17 +372,28 @@ class VariationalAPI:
                 log.exception("Variational: failed to parse app config")
         return cache["data"]
 
+    def _max_leverage_from_config(self, symbol: str, cfg: Dict) -> Optional[float]:
+        """Mirror the Omni UI helper: per-symbol override, else tradfi cap if
+        the market has ``asset_class``, else the crypto default."""
+        symbol = symbol.upper()
+        equity = cfg.get("equity") or {}
+        if symbol in equity:
+            return floor_leverage(equity[symbol])
+        tradfi = cfg.get("tradfi_default")
+        crypto = cfg.get("crypto_default")
+        has_class = bool((cfg.get("asset_class") or {}).get(symbol)) or self._is_rwa_underlying(symbol)
+        if has_class and tradfi is not None:
+            return floor_leverage(tradfi)
+        return floor_leverage(crypto)
+
     def max_leverage_for(self, underlying: str) -> Optional[float]:
-        """Max leverage the UI shows for ``underlying`` (per-equity override,
-        else the live crypto default). Returns None if the live config can't be
-        parsed — we never invent a number."""
+        """Max leverage the UI shows for ``underlying``. Returns None if the
+        live config can't be parsed — we never invent a number."""
         cfg = self.get_app_config_cached()
-        if not cfg or cfg.get("crypto_default") is None:
+        if not cfg:
             return None
-        # Resolve our asset key to Variational's own ticker (e.g. SPY -> US500)
-        # so equity-table lookups hit, mirroring ``calculate_cost``.
         symbol = self._display_symbol(underlying)
-        return cfg["equity"].get(symbol.upper(), cfg["crypto_default"])
+        return self._max_leverage_from_config(symbol, cfg)
 
     def taker_fee_bps(self) -> Optional[float]:
         """Live futures taker fee (bps) parsed from the app config, or None if
@@ -398,10 +496,7 @@ class VariationalAPI:
         closing_slip = sell_slip_bps if is_long else buy_slip_bps
 
         cfg = self.get_app_config_cached() or {}
-        max_lev = (
-            cfg["equity"].get(display.upper(), cfg["crypto_default"])
-            if cfg.get("crypto_default") is not None else None
-        )
+        max_lev = self._max_leverage_from_config(display, cfg)
         fee_bps = cfg.get("taker_fee_bps")
         if fee_bps is None:
             log.warning("Variational: taker fee unavailable for %s — skipping venue", display)

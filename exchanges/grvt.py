@@ -30,7 +30,7 @@ from typing import Any, Dict, Optional, Tuple
 import requests
 from dotenv import load_dotenv
 
-from models import StandardizedOrderbook, ExecutionCalculator
+from models import StandardizedOrderbook, ExecutionCalculator, floor_leverage
 
 load_dotenv()
 log = logging.getLogger(__name__)
@@ -280,7 +280,7 @@ class GRVTAPI:
         from the public margin_rules endpoint. Result is cached after first call.
         """
         if instrument in self._leverage_cache:
-            return self._leverage_cache[instrument]
+            return floor_leverage(self._leverage_cache[instrument])
         try:
             resp = self.session.post(
                 f"{self.BASE_URL}/margin_rules",
@@ -291,8 +291,8 @@ class GRVTAPI:
                 self._leverage_cache[instrument] = None
                 return None
             brackets = resp.json().get('risk_brackets', [])
-            lev = float(brackets[0].get('max_leverage', 0)) if brackets else None
-            self._leverage_cache[instrument] = lev or None
+            lev = floor_leverage(brackets[0].get('max_leverage')) if brackets else None
+            self._leverage_cache[instrument] = lev
             return self._leverage_cache[instrument]
         except Exception:
             log.exception("GRVT max leverage error for %s", instrument)

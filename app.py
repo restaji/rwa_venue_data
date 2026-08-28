@@ -92,6 +92,7 @@ def get_assets():
                 'edgex':        config.edgex_contract_id  is not None,
                 'grvt':         config.grvt_instrument    is not None,
                 'ondo':         config.ondo_symbol        is not None,
+                'pacifica':     config.pacifica_symbol    is not None,
             },
         })
     return jsonify({'assets': assets_list})

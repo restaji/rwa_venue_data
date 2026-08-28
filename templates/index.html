@@ -120,7 +120,7 @@
         </section>
 
         <footer class="footer">
-            <p>Hyperliquid · Lighter · Aster · Avantis · Ostium · Extended · EdgeX · GRVT</p>
+            <p>Hyperliquid · Lighter · Aster · Avantis · Ostium · Extended · EdgeX · GRVT · Pacifica</p>
         </footer>
     </div>
 
@@ -198,6 +198,11 @@
                 logo: 'https://img.cryptorank.io/coins/grvt1734518527544.png',
                 color: '#b8860b',
                 name: 'GRVT'
+            },
+            pacifica: {
+                logo: 'https://app.pacifica.fi/favicon.ico',
+                color: '#22d3ee',
+                name: 'Pacifica'
             }
         };
 
@@ -206,6 +211,10 @@
                 minimumFractionDigits: decimals,
                 maximumFractionDigits: decimals
             });
+        }
+
+        function formatLeverage(lev) {
+            return Math.floor(Number(lev));
         }
 
         function formatUSD(num) {
@@ -369,7 +378,7 @@
                 // Show Max Leverage for Winner
                 const winnerLeverage = document.getElementById('winner-leverage');
                 if (wd.max_leverage != null) {
-                    winnerLeverage.textContent = `Max Lev: ${parseFloat(Number(wd.max_leverage).toFixed(2))}x`;
+                    winnerLeverage.textContent = `Max Lev: ${formatLeverage(wd.max_leverage)}x`;
                     winnerLeverage.style.display = 'inline-block';
                 } else {
                     winnerLeverage.style.display = 'none';
@@ -382,7 +391,7 @@
             }
 
             exchangeGrid.innerHTML = '';
-            const exchanges = ['hyperliquid', 'lighter', 'aster', 'avantis', 'ostium', 'extended', 'edgex', 'grvt'];
+            const exchanges = ['hyperliquid', 'lighter', 'aster', 'avantis', 'ostium', 'extended', 'edgex', 'grvt', 'pacifica'];
 
             const available = exchanges
                 .filter(ex => data[ex])
@@ -463,7 +472,7 @@
                         <span class="exchange-name">${cfg.name}</span>
                         ${symbolHtml}
                     </div>
-                    ${exData.max_leverage != null ? `<span class="leverage-tag" style="background: ${cfg.color}20; color: ${cfg.color}; border: 1px solid ${cfg.color}40;">${parseFloat(Number(exData.max_leverage).toFixed(2))}x</span>` : ''}
+                    ${exData.max_leverage != null ? `<span class="leverage-tag" style="background: ${cfg.color}20; color: ${cfg.color}; border: 1px solid ${cfg.color}40;">${formatLeverage(exData.max_leverage)}x</span>` : ''}
                     ${exchange === winner ? '<span class="winner-tag">Winner</span>' : ''}
                 </div>
                 <div class="card-body">

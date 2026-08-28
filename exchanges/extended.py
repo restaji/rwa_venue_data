@@ -17,7 +17,7 @@ import requests
 
 log = logging.getLogger(__name__)
 
-from models import StandardizedOrderbook, ExecutionCalculator
+from models import StandardizedOrderbook, ExecutionCalculator, floor_leverage
 
 
 class ExtendedAPI:
@@ -91,15 +91,17 @@ class ExtendedAPI:
                     markets = data.get('data', [])
                     if markets:
                         trading_config = markets[0].get('tradingConfig', {})
-                        self.market_cache[market]        = {'max_leverage': float(trading_config.get('maxLeverage', 0))}
+                        self.market_cache[market]        = {
+                            'max_leverage': floor_leverage(trading_config.get('maxLeverage')),
+                        }
                         self.market_cache_loaded[market] = True
         except Exception:
             log.exception("Error fetching Extended market info for %s", market)
 
-    def get_max_leverage(self, market: str) -> Optional[float]:
-        """Get max leverage for a market."""
+    def get_max_leverage(self, market: str) -> Optional[int]:
+        """Get max leverage for a market, floored to a whole number."""
         self._load_market_info(market)
-        return self.market_cache.get(market, {}).get('max_leverage')
+        return floor_leverage(self.market_cache.get(market, {}).get('max_leverage'))
 
     # ------------------------------------------------------------------
     # Orderbook

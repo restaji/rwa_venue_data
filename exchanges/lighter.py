@@ -8,7 +8,6 @@ Covers: orderbook, fees (from orderBookDetails API), and max leverage
 from __future__ import annotations
 
 import logging
-import math
 import time
 from typing import Dict, Optional, Tuple
 
@@ -16,7 +15,7 @@ import requests
 
 log = logging.getLogger(__name__)
 
-from models import StandardizedOrderbook, ExecutionCalculator
+from models import StandardizedOrderbook, ExecutionCalculator, floor_leverage
 
 
 class LighterAPI:
@@ -51,6 +50,8 @@ class LighterAPI:
                             'taker_fee_bps':             taker,
                             'maker_fee_bps':             maker,
                             'min_initial_margin_fraction': float(min_margin) if min_margin else None,
+                            'symbol':                    m.get('symbol') or m.get('market_symbol') or m.get('name'),
+                            'status':                    m.get('status'),
                         }
                 self.market_cache_loaded = True
         except Exception:
@@ -74,15 +75,14 @@ class LighterAPI:
     def get_max_leverage(self, market_id: int) -> Optional[float]:
         """
         Get max leverage calculated from min_initial_margin_fraction.
-        max_leverage = 10000 / min_initial_margin_fraction. Rounded to 2 decimals for display.
+        max_leverage = 10000 / min_initial_margin_fraction, floored to a whole number.
         """
         self._load_market_cache()
         key = self._market_key(market_id)
         market_data = self.market_cache.get(key, {}) if key is not None else {}
         min_margin  = market_data.get('min_initial_margin_fraction')
         if min_margin and min_margin > 0:
-            lev = 10000 / min_margin
-            return round(lev, 2)
+            return floor_leverage(10000 / min_margin)
         return None
 
     # ------------------------------------------------------------------

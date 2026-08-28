@@ -21,6 +21,7 @@ from models import (
     HYPERLIQUID_NO_GROWTH_MODE_SCALE,
     StandardizedOrderbook,
     ExecutionCalculator,
+    floor_leverage,
 )
 
 
@@ -33,6 +34,7 @@ class HyperliquidAPI:
         self.growth_mode_cache:   Dict = {}   
         self.fee_cache:           Dict = {}   
         self.funding_cache:       Dict = {}   
+        self.deployer_fee_scale_cache: Dict = {}   # per-asset, from meta universe
 
         self.deployer_fee_scale: Optional[float] = None
         self.base_taker_rate:    Optional[float] = None
@@ -122,6 +124,7 @@ class HyperliquidAPI:
             self.max_leverages_cache = {}
             self.growth_mode_cache   = {}
             self.funding_cache       = {}
+            self.deployer_fee_scale_cache = {}
 
             for dex_name in ("xyz", "flx"):
                 payload  = {"type": "metaAndAssetCtxs", "dex": dex_name}
@@ -143,6 +146,11 @@ class HyperliquidAPI:
                     growth_mode = item.get("growthMode")
                     funding_1h  = float(asset_ctxs[i].get("funding", 0)) if i < len(asset_ctxs) else 0.0
 
+                    try:
+                        fee_scale = float(item["deployerFeeScale"])
+                    except (KeyError, TypeError, ValueError):
+                        fee_scale = None
+
                     if name:
                         stripped = name.replace(f"{dex_name}:", "") if name.startswith(f"{dex_name}:") else name
                         prefixed = f"{dex_name}:{name}" if not name.startswith(f"{dex_name}:") else name
@@ -150,6 +158,8 @@ class HyperliquidAPI:
                             self.max_leverages_cache[key] = max_lev
                             self.growth_mode_cache[key]   = growth_mode == "enabled"
                             self.funding_cache[key]       = funding_1h
+                            if fee_scale is not None:
+                                self.deployer_fee_scale_cache[key] = fee_scale
 
             self.last_metadata_fetch = time.time()
         except Exception:
@@ -177,18 +187,24 @@ class HyperliquidAPI:
         growth_enabled   = self.growth_mode_cache.get(search_symbol,
                            self.growth_mode_cache.get(plain_symbol, True))
 
+        # deployerFeeScale is published per-asset in the meta universe. The
+        # dex-level value from perpDexs is only a fallback — it was dropped from
+        # that response, so it is usually None now.
+        asset_scale = self.deployer_fee_scale_cache.get(
+            search_symbol, self.deployer_fee_scale_cache.get(plain_symbol)
+        )
+
         if is_flx:
-            if self.flx_base_taker_rate is None or self.flx_deployer_fee_scale is None:
-                return (None, None)
-            deployer_fee_scale = self.flx_deployer_fee_scale
+            deployer_fee_scale = asset_scale if asset_scale is not None else self.flx_deployer_fee_scale
             base_taker         = self.flx_base_taker_rate
             base_maker         = self.flx_base_maker_rate
         else:
-            if self.base_taker_rate is None or self.deployer_fee_scale is None:
-                return (None, None)
-            deployer_fee_scale = self.deployer_fee_scale
+            deployer_fee_scale = asset_scale if asset_scale is not None else self.deployer_fee_scale
             base_taker         = self.base_taker_rate
             base_maker         = self.base_maker_rate
+
+        if base_taker is None or deployer_fee_scale is None:
+            return (None, None)
 
         scale_if_hip3 = (deployer_fee_scale + 1) if deployer_fee_scale < 1 else (deployer_fee_scale * 2)
         growth_scale  = HYPERLIQUID_GROWTH_MODE_SCALE if growth_enabled else HYPERLIQUID_NO_GROWTH_MODE_SCALE
@@ -211,12 +227,12 @@ class HyperliquidAPI:
     # ------------------------------------------------------------------
     # Max leverage
     # ------------------------------------------------------------------
-    def get_max_leverage(self, symbol: str) -> Optional[float]:
+    def get_max_leverage(self, symbol: str) -> Optional[int]:
         self._fetch_metadata()
         if self._is_flx_symbol(symbol):
             key = self._resolve_flx_coin(symbol)  # flx:OIL-USDH -> flx:OIL
-            return self.max_leverages_cache.get(key)
-        return self.max_leverages_cache.get(f"xyz:{symbol}")
+            return floor_leverage(self.max_leverages_cache.get(key))
+        return floor_leverage(self.max_leverages_cache.get(f"xyz:{symbol}"))
 
     def _resolve_xyz_name(self, symbol: str) -> str:
         """Map common RWA ticker to xyz dex internal name."""
@@ -234,15 +250,28 @@ class HyperliquidAPI:
             return "kPW"
         return s
 
+    # l2Book is the only per-request call in the compare path, so a 429 here
+    # silently drops the whole venue from the comparison. Retry briefly.
+    _BOOK_RETRIES     = 3
+    _BOOK_RETRY_DELAY = 0.4
+
     def _fetch_coin(self, coin: str, n_sig_figs: Optional[int]) -> Optional[Dict]:
         payload = {"type": "l2Book", "coin": coin}
         if n_sig_figs is not None:
             payload["nSigFigs"] = n_sig_figs
 
         try:
-            response = requests.post(self.base_url, json=payload, headers=self.headers, timeout=30)
-            if response.status_code != 200:
+            for attempt in range(self._BOOK_RETRIES):
+                response = requests.post(self.base_url, json=payload, headers=self.headers, timeout=30)
+                if response.status_code == 200:
+                    break
+                if response.status_code == 429 and attempt < self._BOOK_RETRIES - 1:
+                    time.sleep(self._BOOK_RETRY_DELAY * (attempt + 1))
+                    continue
+                log.warning("HL l2Book %s failed: HTTP %s %s",
+                            coin, response.status_code, response.text[:120])
                 return None
+
             data = response.json()
             if not data:
                 return None
@@ -268,6 +297,7 @@ class HyperliquidAPI:
 
             return {'levels': [formatted_bids, formatted_asks]}
         except Exception:
+            log.exception("HL l2Book error for %s", coin)
             return None
 
     def get_orderbook(self, symbol: str, n_sig_figs: Optional[int] = None) -> Optional[Dict]:

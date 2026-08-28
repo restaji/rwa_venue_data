@@ -15,7 +15,7 @@ from typing import Dict, Optional
 
 log = logging.getLogger(__name__)
 
-from models import ASSETS
+from models import ASSETS, floor_leverage
 from exchanges.hyperliquid  import HyperliquidAPI
 from exchanges.lighter      import LighterAPI
 from exchanges.aster        import AsterAPI
@@ -26,6 +26,7 @@ from exchanges.edgex        import EdgeXAPI
 from exchanges.grvt         import GRVTAPI
 from exchanges.variational  import VariationalAPI
 from exchanges.ondo         import OndoAPI
+from exchanges.pacifica     import PacificaAPI
 
 
 class FeeComparator:
@@ -40,6 +41,7 @@ class FeeComparator:
         self.grvt         = GRVTAPI()
         self.variational  = VariationalAPI()
         self.ondo         = OndoAPI()
+        self.pacifica     = PacificaAPI()
         self._warmup_done = threading.Event()
         threading.Thread(target=self._warmup, daemon=True, name="warmup").start()
 
@@ -116,6 +118,18 @@ class FeeComparator:
             except Exception:
                 log.exception("Ondo markets load error")
 
+        def _preload_pacifica() -> None:
+            try:
+                self.pacifica._load_meta()
+                self.pacifica._load_fees()
+                log.info(
+                    "Pacifica: %d markets loaded (taker=%.2f bps)",
+                    len(self.pacifica._meta_cache or {}),
+                    (self.pacifica._fees[0] or 0),
+                )
+            except Exception:
+                log.exception("Pacifica meta/fees load error")
+
         def _warm_fees(asset_key: str) -> str:
             config = ASSETS[asset_key]
             if config.aster_symbol:
@@ -125,7 +139,7 @@ class FeeComparator:
             return asset_key
 
         assets = list(ASSETS.keys())
-        global_tasks = [_preload_hyperliquid, _preload_edgex, _preload_lighter, _preload_grvt, _preload_avantis, _preload_ondo]
+        global_tasks = [_preload_hyperliquid, _preload_edgex, _preload_lighter, _preload_grvt, _preload_avantis, _preload_ondo, _preload_pacifica]
         per_asset_tasks = [lambda a=a: _warm_fees(a) for a in assets]
         all_tasks = global_tasks + per_asset_tasks
 
@@ -176,6 +190,7 @@ class FeeComparator:
             'grvt':          None,
             'variational':   None,
             'ondo':          None,
+            'pacifica':      None,
             'symbols': {
                 'hyperliquid':  config.hyperliquid_symbol,
                 'lighter':      config.symbol_key if config.lighter_market_id else None,
@@ -187,6 +202,7 @@ class FeeComparator:
                 'grvt':         config.grvt_instrument,
                 'variational':  self.variational.VARIATIONAL_SYMBOLS.get(asset_key.upper()),
                 'ondo':         config.ondo_symbol,
+                'pacifica':     config.pacifica_symbol,
             },
         }
 
@@ -205,12 +221,14 @@ class FeeComparator:
 
         def fetch_lighter():
             if not config.lighter_market_id:
-                return 'lighter', None
+                return 'lighter', None, None
             ob = self.lighter.get_orderbook(config.lighter_market_id)
             r  = self.lighter.calculate_execution_cost(ob, order_size_usd, market_id=config.lighter_market_id)
+            mk = self.lighter._market_key(config.lighter_market_id)
+            live_sym = (self.lighter.market_cache.get(mk) or {}).get("symbol") if mk is not None else None
             if r:
-                r['symbol'] = config.symbol_key
-            return 'lighter', r
+                r['symbol'] = live_sym or config.symbol_key
+            return 'lighter', r, live_sym
 
         def fetch_aster():
             if not config.aster_symbol:
@@ -223,9 +241,13 @@ class FeeComparator:
 
         def fetch_avantis():
             r = self.avantis.calculate_cost(asset_key, order_size_usd, is_long=is_long)
+            sym = None
             if r:
+                # Avantis returns its own ticker (e.g. US500/USD for pair 78);
+                # fall back to the registry symbol only if the API omitted it.
                 r['symbol'] = r.get('symbol') or config.symbol_key
-            return 'avantis', r
+                sym = r['symbol']
+            return 'avantis', r, sym
 
         def fetch_ostium():
             if not config.ostium_symbol:
@@ -284,9 +306,21 @@ class FeeComparator:
                 log.exception("Ondo fetch error")
                 return 'ondo', None
 
+        def fetch_pacifica():
+            if not config.pacifica_symbol:
+                return 'pacifica', None
+            try:
+                r = self.pacifica.get_optimal_execution(config.pacifica_symbol, order_size_usd)
+                if r:
+                    r['symbol'] = config.pacifica_symbol
+                return 'pacifica', r
+            except Exception:
+                log.exception("Pacifica fetch error")
+                return 'pacifica', None
+
         tasks = [fetch_hyperliquid, fetch_lighter, fetch_aster, fetch_avantis,
                  fetch_ostium, fetch_extended, fetch_edgex, fetch_grvt, fetch_variational,
-                 fetch_ondo]
+                 fetch_ondo, fetch_pacifica]
 
         with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
             futures = {executor.submit(fn): fn for fn in tasks}
@@ -298,6 +332,16 @@ class FeeComparator:
                         result['hyperliquid'] = r
                         if sym:
                             result['symbols']['hyperliquid'] = sym
+                    elif res[0] == 'lighter':
+                        _, r, live_sym = res
+                        result['lighter'] = r
+                        if live_sym:
+                            result['symbols']['lighter'] = live_sym
+                    elif res[0] == 'avantis':
+                        _, r, sym = res
+                        result['avantis'] = r
+                        if sym:
+                            result['symbols']['avantis'] = sym
                     elif res[0] == 'grvt':
                         _, r, grvt_dbg = res
                         result['grvt'] = r
@@ -311,7 +355,7 @@ class FeeComparator:
 
         # Maker order override: zero slippage for orderbook-based exchanges
         if order_type == 'maker':
-            for name in ['hyperliquid', 'lighter', 'aster', 'extended', 'edgex', 'grvt', 'ondo']:
+            for name in ['hyperliquid', 'lighter', 'aster', 'extended', 'edgex', 'grvt', 'ondo', 'pacifica']:
                 ex_data = result.get(name)
                 if ex_data:
                     ex_data['slippage_bps']      = 0.0
@@ -351,6 +395,7 @@ class FeeComparator:
         edgex_taker,    edgex_maker    = self.edgex.get_fees(config.edgex_contract_id)        if config.edgex_contract_id   else (None, None)
         grvt_taker,     grvt_maker     = self.grvt.get_fees(config.grvt_instrument)           if config.grvt_instrument      else (None, None)
         ondo_taker,     ondo_maker     = self.ondo.get_fees(config.ondo_symbol)               if config.ondo_symbol          else (None, None)
+        pacifica_taker, pacifica_maker = self.pacifica.get_fees(config.pacifica_symbol)       if config.pacifica_symbol      else (None, None)
 
         if order_type == 'maker':
             fee_structure = {
@@ -361,6 +406,7 @@ class FeeComparator:
                 'edgex':       {'open': edgex_maker,    'close': edgex_maker},
                 'grvt':        {'open': grvt_maker,     'close': grvt_maker},
                 'ondo':        {'open': ondo_maker,     'close': ondo_maker},
+                'pacifica':    {'open': pacifica_maker, 'close': pacifica_maker},
             }
         else:
             fee_structure = {
@@ -371,6 +417,7 @@ class FeeComparator:
                 'edgex':       {'open': edgex_taker,    'close': edgex_taker},
                 'grvt':        {'open': grvt_taker,     'close': grvt_taker},
                 'ondo':        {'open': ondo_taker,     'close': ondo_taker},
+                'pacifica':    {'open': pacifica_taker, 'close': pacifica_taker},
             }
 
         os_data = result.get('ostium')
@@ -392,7 +439,7 @@ class FeeComparator:
 
         # Standardize opening/closing slippage by direction
         is_long = (direction == 'long')
-        for name in ['hyperliquid', 'lighter', 'aster', 'ostium', 'extended', 'edgex', 'grvt', 'variational', 'ondo']:
+        for name in ['hyperliquid', 'lighter', 'aster', 'ostium', 'extended', 'edgex', 'grvt', 'variational', 'ondo', 'pacifica']:
             ex_data = result.get(name)
             if ex_data:
                 buy_slip  = round(ex_data.get('buy_slippage_bps',  0.0), 3)
@@ -402,9 +449,11 @@ class FeeComparator:
                 ex_data['slippage_type']         = 'opening_closing'
 
         # Calculate totals and collect for winner ranking
-        for name in ['hyperliquid', 'lighter', 'aster', 'avantis', 'ostium', 'extended', 'edgex', 'grvt', 'variational', 'ondo']:
+        for name in ['hyperliquid', 'lighter', 'aster', 'avantis', 'ostium', 'extended', 'edgex', 'grvt', 'variational', 'ondo', 'pacifica']:
             ex_data = result.get(name)
             if ex_data:
+                if ex_data.get('max_leverage') is not None:
+                    ex_data['max_leverage'] = floor_leverage(ex_data['max_leverage'])
                 fees           = fee_structure.get(name, {'open': None, 'close': None})
                 slippage       = ex_data.get('slippage_bps', 0)
                 if slippage is None:

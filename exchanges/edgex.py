@@ -5,11 +5,11 @@ exchanges/edgex.py - EdgeX exchange integration.
 Covers: orderbook-based slippage, taker/maker fees, max leverage (tier 1),
 and 4H funding rate (× 6 for 24H).
 
-Public APIs used:
-  Metadata:  GET https://pro.edgex.exchange/api/v1/public/meta/getMetaData
-  Orderbook: GET https://pro.edgex.exchange/api/v1/public/quote/getDepth?contractId=X&level=200
-  Funding:   GET https://pro.edgex.exchange/api/v1/public/funding/getFundingRatePage
-                   ?filterSettlementFundingRate=true&contractId=X&size=1
+Public APIs used (v2 — the v1 host still answers but serves a stale, delisted
+USD-quoted contract set with permanently empty books; live markets are the
+USDC-quoted contracts on the v2 host):
+  Metadata:  GET https://edgex-prod-v2.edgex.exchange/api/v2/public/meta/getMetaData
+  Orderbook: GET https://edgex-prod-v2.edgex.exchange/api/v2/public/quote/getDepth?contractId=X&level=200
 """
 from __future__ import annotations
 
@@ -21,13 +21,13 @@ import requests
 
 log = logging.getLogger(__name__)
 
-from models import StandardizedOrderbook, ExecutionCalculator
+from models import StandardizedOrderbook, ExecutionCalculator, floor_leverage
 
 
 class EdgeXAPI:
     """Client for EdgeX exchange orderbook and fee data."""
 
-    BASE_URL    = "https://pro.edgex.exchange/api/v1/public"
+    BASE_URL    = "https://edgex-prod-v2.edgex.exchange/api/v2/public"
     DEPTH_URL   = f"{BASE_URL}/quote/getDepth"
     META_URL    = f"{BASE_URL}/meta/getMetaData"
 
@@ -64,7 +64,7 @@ class EdgeXAPI:
                 max_lev = None
                 if risk_tiers:
                     try:
-                        max_lev = float(risk_tiers[0].get('maxLeverage', 0)) or None
+                        max_lev = floor_leverage(risk_tiers[0].get('maxLeverage'))
                     except (TypeError, ValueError):
                         pass
 
@@ -82,9 +82,9 @@ class EdgeXAPI:
         entry = self.meta_cache.get(str(contract_id), {})
         return entry.get('taker_fee_bps'), entry.get('maker_fee_bps')
 
-    def get_max_leverage(self, contract_id: int) -> Optional[float]:
-        """Return tier-1 max leverage for a contract."""
-        return self.meta_cache.get(str(contract_id), {}).get('max_leverage')
+    def get_max_leverage(self, contract_id: int) -> Optional[int]:
+        """Return tier-1 max leverage for a contract, floored to a whole number."""
+        return floor_leverage(self.meta_cache.get(str(contract_id), {}).get('max_leverage'))
 
     # ------------------------------------------------------------------
     # Orderbook
