@@ -87,7 +87,7 @@ class OndoAPI:
             if cache:
                 self._markets_cache = cache
                 self._markets_ts    = now
-        except Exception:
+        except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
             log.exception("Ondo: error loading /markets")
 
     def _market_meta(self, market: str) -> Optional[Dict]:
@@ -129,7 +129,7 @@ class OndoAPI:
             bids = [{"price": float(l[0]), "qty": float(l[1])} for l in raw_bids]
             asks = [{"price": float(l[0]), "qty": float(l[1])} for l in raw_asks]
             return {"bids": bids, "asks": asks}
-        except Exception:
+        except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
             log.exception("Ondo get_orderbook error for market=%s", market)
             return None
 

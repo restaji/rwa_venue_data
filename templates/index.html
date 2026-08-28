@@ -411,77 +411,100 @@
             resultsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
 
+        function escapeHtml(value) {
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function firstDefined(...args) {
+            for (const val of args) {
+                if (val !== undefined && val !== null) return val;
+            }
+            return 0;
+        }
+
+        function slipPair(exData) {
+            if (exData.opening_slippage_bps !== undefined) {
+                return [exData.opening_slippage_bps, exData.closing_slippage_bps];
+            }
+            if (selectedDirection === 'short') {
+                return [exData.sell_slippage_bps, exData.buy_slippage_bps];
+            }
+            return [exData.buy_slippage_bps, exData.sell_slippage_bps];
+        }
+
+        function symbolTagHtml(exData) {
+            const symbol = escapeHtml(exData.symbol || '');
+            if (!symbol) return '';
+            const cls = exData.is_xyz ? 'symbol-tag xyz' : 'symbol-tag';
+            return `<span class="${cls}">${symbol}</span>`;
+        }
+
+        function fillStatusHtml(exData, orderSize) {
+            if (exData.executed !== 'PARTIAL') return 'Full fill';
+            let extra = '';
+            if (!exData.buy?.filled) {
+                extra += ` – Buy: ${formatUSD(exData.buy?.filled_usd || 0)}/${formatUSD(orderSize)}`;
+            }
+            if (!exData.sell?.filled) {
+                extra += ` – Sell: ${formatUSD(exData.sell?.filled_usd || 0)}/${formatUSD(orderSize)}`;
+            }
+            return `Partial fill${extra}`;
+        }
+
+        function leverageTagHtml(exData, cfg) {
+            if (exData.max_leverage == null) return '';
+            return `<span class="leverage-tag" style="background: ${cfg.color}20; color: ${cfg.color}; border: 1px solid ${cfg.color}40;">${formatLeverage(exData.max_leverage)}x</span>`;
+        }
+
+        function updatedHtml(exData) {
+            if (!exData.timestamp) return '';
+            const when = new Date(exData.timestamp * 1000).toLocaleTimeString();
+            return `<div class="metric" style="margin-top: 8px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.04); font-size: 11px; color: rgba(255,255,255,0.4);">
+                        <span>Updated</span>
+                        <span>${escapeHtml(when)}</span>
+                    </div>`;
+        }
+
         function createExchangeCard(exchange, exData, winner, orderSize) {
             const card = document.createElement('div');
-            card.className = 'exchange-card' + (exchange === winner ? ' winner' : '');
+            const isWinner = exchange === winner;
+            card.className = isWinner ? 'exchange-card winner' : 'exchange-card';
 
-            const cfg = exchangeConfig[exchange];
+            const cfg = exchangeConfig[exchange] || { name: exchange, color: '#888', logo: '' };
             const isPartial = exData.executed === 'PARTIAL';
-            const symbol = exData.symbol || '';
-            const isXyz = exData.is_xyz;
-            const symbolHtml = isXyz
-                ? `<span class="symbol-tag xyz">${symbol}</span>`
-                : symbol ? `<span class="symbol-tag">${symbol}</span>` : '';
-
             const holdingFeeBps = getHoldingFeeBps(exData, selectedDirection);
             const fees = (exData.open_fee_bps || 0) + (exData.close_fee_bps || 0);
             const adjustedTotalCost = (exData.total_cost_bps || 0) + holdingFeeBps;
-
-            // Always use Opening/Closing terminology
-            const slipLabel1 = 'Opening Slippage';
-            const slipLabel2 = 'Closing Slippage';
-
-            // Helper to get value with fallback
-            const getVal = (...args) => {
-                for (const val of args) {
-                    if (val !== undefined && val !== null) return val;
-                }
-                return 0;
-            };
-
-            // Determine values based on direction mapping
-            // If backend already provided opening/closing (e.g. Avantis or updated backend), use those.
-            // Otherwise map buy/sell based on global selectedDirection.
-            let valOpen, valClose;
-
-            if (exData.opening_slippage_bps !== undefined) {
-                valOpen = exData.opening_slippage_bps;
-                valClose = exData.closing_slippage_bps;
-            } else {
-                // Determine based on direction
-                // Global 'selectedDirection' is available
-                if (selectedDirection === 'short') {
-                    // Short: Opening = Sell, Closing = Buy
-                    valOpen = exData.sell_slippage_bps;
-                    valClose = exData.buy_slippage_bps;
-                } else {
-                    // Long: Opening = Buy, Closing = Sell
-                    valOpen = exData.buy_slippage_bps;
-                    valClose = exData.sell_slippage_bps;
-                }
-            }
-
-            // Fallback to generic slippage_bps if specific buy/sell missing
-            const slipValue1 = getVal(valOpen, exData.slippage_bps);
-            const slipValue2 = getVal(valClose, exData.slippage_bps);
+            const [valOpen, valClose] = slipPair(exData);
+            const slipValue1 = firstDefined(valOpen, exData.slippage_bps);
+            const slipValue2 = firstDefined(valClose, exData.slippage_bps);
+            const holdClass = holdingFeeBps >= 0 ? 'holding-positive' : 'holding-negative';
+            const holdSign = holdingFeeBps >= 0 ? '+' : '';
+            const fillClass = isPartial ? 'partial' : 'filled';
+            const winnerTag = isWinner ? '<span class="winner-tag">Winner</span>' : '';
 
             card.innerHTML = `
                 <div class="card-header" style="border-color: ${cfg.color}">
-                    <img src="${cfg.logo}" class="exchange-logo" alt="">
+                    <img src="${escapeHtml(cfg.logo)}" class="exchange-logo" alt="">
                     <div class="exchange-info">
-                        <span class="exchange-name">${cfg.name}</span>
-                        ${symbolHtml}
+                        <span class="exchange-name">${escapeHtml(cfg.name)}</span>
+                        ${symbolTagHtml(exData)}
                     </div>
-                    ${exData.max_leverage != null ? `<span class="leverage-tag" style="background: ${cfg.color}20; color: ${cfg.color}; border: 1px solid ${cfg.color}40;">${formatLeverage(exData.max_leverage)}x</span>` : ''}
-                    ${exchange === winner ? '<span class="winner-tag">Winner</span>' : ''}
+                    ${leverageTagHtml(exData, cfg)}
+                    ${winnerTag}
                 </div>
                 <div class="card-body">
                     <div class="metric">
-                        <span class="label">${slipLabel1}</span>
+                        <span class="label">Opening Slippage</span>
                         <span class="value">${formatNumber(slipValue1)} bps</span>
                     </div>
                     <div class="metric">
-                        <span class="label">${slipLabel2}</span>
+                        <span class="label">Closing Slippage</span>
                         <span class="value">${formatNumber(slipValue2)} bps</span>
                     </div>
                     <div class="metric">
@@ -490,7 +513,7 @@
                     </div>
                     <div class="metric holding-fee">
                         <span class="label">Holding Fee (24H)</span>
-                        <span class="value ${holdingFeeBps >= 0 ? 'holding-positive' : 'holding-negative'}">${holdingFeeBps >= 0 ? '+' : ''}${formatNumber(holdingFeeBps)} bps</span>
+                        <span class="value ${holdClass}">${holdSign}${formatNumber(holdingFeeBps)} bps</span>
                     </div>
                     <div class="metric total">
                         <span class="label">Total Cost</span>
@@ -500,14 +523,9 @@
                         <span class="label">USD Cost</span>
                         <span class="value">${formatUSD(orderSize * adjustedTotalCost / 10000)}</span>
                     </div>
-                    ${exData.timestamp ? `
-                    <div class="metric" style="margin-top: 8px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.04); font-size: 11px; color: rgba(255,255,255,0.4);">
-                        <span>Updated</span>
-                        <span>${new Date(exData.timestamp * 1000).toLocaleTimeString()}</span>
-                    </div>` : ''}
-                    <div class="fill-status ${isPartial ? 'partial' : 'filled'}">
-                        ${isPartial ? `Partial fill${!exData.buy?.filled ? ` – Buy: ${formatUSD(exData.buy?.filled_usd || 0)}/${formatUSD(orderSize)}` : ''
-                    }${!exData.sell?.filled ? ` – Sell: ${formatUSD(exData.sell?.filled_usd || 0)}/${formatUSD(orderSize)}` : ''}` : 'Full fill'}
+                    ${updatedHtml(exData)}
+                    <div class="fill-status ${fillClass}">
+                        ${fillStatusHtml(exData, orderSize)}
                     </div>
                 </div>
             `;

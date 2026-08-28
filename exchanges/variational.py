@@ -116,7 +116,7 @@ class VariationalAPI:
                 log.warning("Variational: GET %s failed HTTP %s", url, r.status_code)
                 return None
             return r.json()
-        except Exception:
+        except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
             log.exception("Variational: GET %s error", url)
             return None
 
@@ -145,7 +145,7 @@ class VariationalAPI:
                 )
                 return None
             return r.json()
-        except Exception:
+        except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
             log.exception("Variational: quote request error for %s", underlying)
             return None
 
@@ -315,7 +315,7 @@ class VariationalAPI:
             seen.add(url)
             try:
                 text = self._get(url)
-            except Exception:
+            except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
                 continue
 
             for ticker, lev in self._parse_equity(text).items():
@@ -368,7 +368,7 @@ class VariationalAPI:
             try:
                 cache["data"] = self.get_app_config()
                 cache["ts"] = now
-            except Exception:
+            except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
                 log.exception("Variational: failed to parse app config")
         return cache["data"]
 

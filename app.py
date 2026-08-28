@@ -26,6 +26,7 @@ from flask_socketio import SocketIO, emit
 
 from models import ASSETS
 from comparator import FeeComparator
+from exchanges.variational import VariationalAPI
 
 load_dotenv()
 
@@ -42,6 +43,7 @@ MAX_ORDER_SIZE = 1_000_000_000  # $1B upper bound
 MIN_ORDER_SIZE = 1              # $1 lower bound
 VALID_ORDER_TYPES = {'taker', 'maker'}
 VALID_DIRECTIONS = {'long', 'short'}
+COMPARE_FAILED = {'error': 'Failed to compare asset'}
 
 
 def _validated_order_size(raw) -> float:
@@ -54,6 +56,25 @@ def _validated_order_size(raw) -> float:
     if val < MIN_ORDER_SIZE or val > MAX_ORDER_SIZE:
         return None
     return val
+
+
+def _bad_request(message: str, extra: dict = None):
+    payload = {'error': message}
+    if extra:
+        payload.update(extra)
+    return jsonify(payload), 400
+
+
+def _execute_compare(asset: str, order_size: float, order_type: str, direction: str):
+    result = comparator.compare_asset(asset, order_size, order_type=order_type, direction=direction)
+    if not result:
+        return jsonify(COMPARE_FAILED), 500
+    try:
+        result = comparator.calculate_totals_and_winner(result, asset, order_type, direction)
+        return jsonify(result)
+    except (TypeError, ValueError, KeyError):
+        log.exception("compare failed for %s", asset)
+        return jsonify(COMPARE_FAILED), 500
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +112,7 @@ def get_assets():
                 'extended':     config.extended_symbol    is not None,
                 'edgex':        config.edgex_contract_id  is not None,
                 'grvt':         config.grvt_instrument    is not None,
+                'variational':  key.upper() in VariationalAPI.VARIATIONAL_SYMBOLS,
                 'ondo':         config.ondo_symbol        is not None,
                 'pacifica':     config.pacifica_symbol    is not None,
             },
@@ -103,7 +125,7 @@ def compare():
     """Compare slippage across exchanges for given asset and order size."""
     data = request.get_json(silent=True)
     if not data:
-        return jsonify({'error': 'Request body must be valid JSON'}), 400
+        return _bad_request('Request body must be valid JSON')
 
     asset      = str(data.get('asset', '')).upper()
     order_size = _validated_order_size(data.get('order_size', 1_000_000))
@@ -111,59 +133,35 @@ def compare():
     direction  = str(data.get('direction',  'long')).lower()
 
     if order_size is None:
-        return jsonify({'error': f'order_size must be a number between {MIN_ORDER_SIZE} and {MAX_ORDER_SIZE}'}), 400
+        return _bad_request(f'order_size must be a number between {MIN_ORDER_SIZE} and {MAX_ORDER_SIZE}')
     if order_type not in VALID_ORDER_TYPES:
-        return jsonify({'error': f'order_type must be one of: {", ".join(VALID_ORDER_TYPES)}'}), 400
+        return _bad_request(f'order_type must be one of: {", ".join(VALID_ORDER_TYPES)}')
     if direction not in VALID_DIRECTIONS:
-        return jsonify({'error': f'direction must be one of: {", ".join(VALID_DIRECTIONS)}'}), 400
+        return _bad_request(f'direction must be one of: {", ".join(VALID_DIRECTIONS)}')
     if asset not in ASSETS:
-        return jsonify({'error': f'Asset {asset} not found'}), 400
+        return _bad_request(f'Asset {asset} not found')
 
-    result = comparator.compare_asset(asset, order_size, order_type=order_type, direction=direction)
-    if not result:
-        return jsonify({'error': 'Failed to compare asset'}), 500
-
-    result = comparator.calculate_totals_and_winner(result, asset, order_type, direction)
-    return jsonify(result)
+    return _execute_compare(asset, order_size, order_type, direction)
 
 
 @app.route('/api/compare/<asset>', methods=['GET'])
 def compare_get(asset: str):
-    """
-    GET endpoint for comparing slippage across exchanges.
-
-    URL: /api/compare/<asset>?size=1000000&order_type=taker&direction=long
-
-    Parameters:
-        asset (path):       Asset symbol (e.g. XAU, XAG, AAPL, NVDA)
-        size (query):       Order size in USD (default: 1000000)
-        order_type (query): 'taker' or 'maker'  (default: taker)
-        direction (query):  'long'  or 'short'  (default: long)
-
-    Examples:
-        GET /api/compare/XAU?size=50000
-        GET /api/compare/NVDA?size=1000000&order_type=maker
-    """
+    """GET endpoint for comparing slippage across exchanges."""
     asset      = asset.upper()
     order_size = _validated_order_size(request.args.get('size', 1_000_000))
     order_type = request.args.get('order_type', 'taker').lower()
     direction  = request.args.get('direction',  'long').lower()
 
     if order_size is None:
-        return jsonify({'error': f'size must be a number between {MIN_ORDER_SIZE} and {MAX_ORDER_SIZE}'}), 400
+        return _bad_request(f'size must be a number between {MIN_ORDER_SIZE} and {MAX_ORDER_SIZE}')
     if order_type not in VALID_ORDER_TYPES:
-        return jsonify({'error': f'order_type must be one of: {", ".join(VALID_ORDER_TYPES)}'}), 400
+        return _bad_request(f'order_type must be one of: {", ".join(VALID_ORDER_TYPES)}')
     if direction not in VALID_DIRECTIONS:
-        return jsonify({'error': f'direction must be one of: {", ".join(VALID_DIRECTIONS)}'}), 400
+        return _bad_request(f'direction must be one of: {", ".join(VALID_DIRECTIONS)}')
     if asset not in ASSETS:
-        return jsonify({'error': f'Asset {asset} not found', 'available_assets': list(ASSETS.keys())}), 400
+        return _bad_request(f'Asset {asset} not found', {'available_assets': list(ASSETS.keys())})
 
-    result = comparator.compare_asset(asset, order_size, order_type=order_type, direction=direction)
-    if not result:
-        return jsonify({'error': 'Failed to compare asset'}), 500
-
-    result = comparator.calculate_totals_and_winner(result, asset, order_type, direction)
-    return jsonify(result)
+    return _execute_compare(asset, order_size, order_type, direction)
 
 
 # ---------------------------------------------------------------------------
@@ -197,19 +195,20 @@ def handle_compare(data):
 
         result = comparator.compare_asset(asset, order_size, order_type=order_type, direction=direction)
         if not result:
-            emit('compare_error', {'error': 'Failed to compare asset'})
+            emit('compare_error', COMPARE_FAILED)
             return
 
         result = comparator.calculate_totals_and_winner(result, asset, order_type, direction)
         emit('compare_result', result)
-    except Exception:
+    except (TypeError, ValueError, KeyError):
         log.exception("WebSocket compare handler error")
         emit('compare_error', {'error': 'Internal server error'})
 
 
 # ---------------------------------------------------------------------------
-# Health check for K8s probes
+# Health check for K8s probes (CD_SETUP still hits `/`)
 # ---------------------------------------------------------------------------
+@app.route('/')
 @app.route('/health')
 def health():
     return jsonify({'status': 'ok'}), 200

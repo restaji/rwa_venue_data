@@ -71,7 +71,7 @@ class ExtendedAPI:
 
             self.fee_cache[market] = {'taker_fee_bps': taker_bps, 'maker_fee_bps': maker_bps}
             return (taker_bps, maker_bps)
-        except Exception:
+        except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
             log.exception("Error fetching Extended fees for %s", market)
             return (None, None)
 
@@ -95,7 +95,7 @@ class ExtendedAPI:
                             'max_leverage': floor_leverage(trading_config.get('maxLeverage')),
                         }
                         self.market_cache_loaded[market] = True
-        except Exception:
+        except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
             log.exception("Error fetching Extended market info for %s", market)
 
     def get_max_leverage(self, market: str) -> Optional[int]:
@@ -114,7 +114,7 @@ class ExtendedAPI:
                 return None
             data = response.json()
             return data.get('data') if data.get('status') == 'OK' else None
-        except Exception:
+        except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
             log.exception("Extended API error for %s", market)
             return None
 

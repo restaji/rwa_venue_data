@@ -28,33 +28,33 @@ class LighterAPI:
     # ------------------------------------------------------------------
     # Fees & max leverage
     # ------------------------------------------------------------------
+    def _cache_one_market(self, market: Dict) -> None:
+        market_id = market.get('market_id')
+        if market_id is None:
+            return
+        key = int(market_id) if isinstance(market_id, (int, float)) else market_id
+        min_margin = market.get('min_initial_margin_fraction')
+        self.market_cache[key] = {
+            'taker_fee_bps':              float(market.get('taker_fee', '0')) * 100,
+            'maker_fee_bps':              float(market.get('maker_fee', '0')) * 100,
+            'min_initial_margin_fraction': float(min_margin) if min_margin else None,
+            'symbol':                     market.get('symbol') or market.get('market_symbol') or market.get('name'),
+            'status':                     market.get('status'),
+        }
+
     def _load_market_cache(self):
         """Load fees and margin info from orderBookDetails API for all perp markets."""
         if self.market_cache_loaded:
             return
-
         try:
             url      = f"{self.base_url}/orderBookDetails"
             response = requests.get(url, headers=self.headers, timeout=30)
-            if response.status_code == 200:
-                data    = response.json()
-                markets = data.get('order_book_details', [])
-                for m in markets:
-                    market_id = m.get('market_id')
-                    if market_id is not None:
-                        key = int(market_id) if isinstance(market_id, (int, float)) else market_id
-                        taker       = float(m.get('taker_fee', '0')) * 100   # → bps
-                        maker       = float(m.get('maker_fee', '0')) * 100
-                        min_margin  = m.get('min_initial_margin_fraction')
-                        self.market_cache[key] = {
-                            'taker_fee_bps':             taker,
-                            'maker_fee_bps':             maker,
-                            'min_initial_margin_fraction': float(min_margin) if min_margin else None,
-                            'symbol':                    m.get('symbol') or m.get('market_symbol') or m.get('name'),
-                            'status':                    m.get('status'),
-                        }
-                self.market_cache_loaded = True
-        except Exception:
+            if response.status_code != 200:
+                return
+            for market in response.json().get('order_book_details', []):
+                self._cache_one_market(market)
+            self.market_cache_loaded = True
+        except (requests.RequestException, TypeError, ValueError, KeyError, OSError):
             log.exception("Error loading Lighter market cache")
 
     def _market_key(self, market_id: Optional[int]) -> Optional[int]:
@@ -94,7 +94,7 @@ class LighterAPI:
             response = requests.get(url, headers=self.headers, timeout=30)
             response.raise_for_status()
             return response.json()
-        except Exception:
+        except (requests.RequestException, TypeError, ValueError, KeyError, OSError):
             log.exception("Lighter get_orderbook error for market_id=%s", market_id)
             return None
 

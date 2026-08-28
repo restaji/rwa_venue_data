@@ -99,7 +99,7 @@ class PacificaAPI:
             if cache:
                 self._meta_cache = cache
                 self._meta_ts = now
-        except Exception:
+        except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
             log.exception("Pacifica: error loading /info")
 
     def _meta(self, symbol: str) -> Optional[Dict]:
@@ -136,7 +136,7 @@ class PacificaAPI:
             maker_bps = round(float(base["maker_fee_rate"]) * 10_000, 4)
             self._fees = (taker_bps, maker_bps)
             self._fees_ts = now
-        except Exception:
+        except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
             log.exception("Pacifica: error loading /info/fees")
 
     def get_fees(self, symbol: Optional[str] = None) -> Tuple[Optional[float], Optional[float]]:
@@ -164,7 +164,7 @@ class PacificaAPI:
             if not payload.get("success"):
                 return None
             return payload.get("data")
-        except Exception:
+        except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
             log.exception("Pacifica get_orderbook error for %s", api_symbol)
             return None
 

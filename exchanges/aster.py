@@ -92,12 +92,12 @@ class AsterAPI:
                     body = response.json()
                     log.warning("Aster: 400 for %s %s — code=%s msg=%s",
                                 method, endpoint, body.get('code'), body.get('msg'))
-                except Exception:
+                except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
                     log.warning("Aster: 400 for %s %s", method, endpoint)
                 return None
             response.raise_for_status()
             return response.json()
-        except Exception:
+        except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
             log.exception("Aster API request failed")
             return None
 
@@ -138,7 +138,7 @@ class AsterAPI:
 
             self.fee_cache[symbol] = {'taker_fee_bps': taker_bps, 'maker_fee_bps': maker_bps}
             return (taker_bps, maker_bps)
-        except Exception:
+        except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
             log.exception("Error fetching Aster fees for %s", symbol)
             return (None, None)
 
@@ -165,7 +165,7 @@ class AsterAPI:
                         self.leverage_cache[symbol]        = max_lev
                         self.leverage_cache_loaded[symbol] = True
                         return max_lev
-        except Exception:
+        except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
             log.exception("Error fetching Aster max leverage for %s", symbol)
 
         self.leverage_cache_loaded[symbol] = True
@@ -195,7 +195,7 @@ class AsterAPI:
             bids = [{'price': float(l[0]), 'qty': float(l[1])} for l in data['bids']]
             asks = [{'price': float(l[0]), 'qty': float(l[1])} for l in data['asks']]
             return {'bids': bids, 'asks': asks}
-        except Exception:
+        except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
             log.exception("Aster get_orderbook error for symbol=%s", symbol)
             return None
 

@@ -106,7 +106,7 @@ class AvantisAPI:
             self._pair_data  = data.get("pairInfos", {})
             self._group_info = data.get("groupInfo", {})
             self._last_fetch = now
-        except Exception:
+        except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
             log.exception("Avantis trading API error")
             self._pair_data  = self._pair_data  or {}
             self._group_info = self._group_info or {}
@@ -154,7 +154,7 @@ class AvantisAPI:
                 })
             self._snapshots    = by_pair
             self._snapshots_at = now
-        except Exception:
+        except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
             log.warning("Avantis risk snapshots fetch failed", exc_info=True)
             # keep the previous cache; do not clobber
 
@@ -219,7 +219,7 @@ class AvantisAPI:
                 log.debug("risk /spread %s -> %d: %s", body, resp.status_code, resp.text[:200])
                 return None
             return resp.json()
-        except Exception:
+        except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
             log.warning("Avantis risk /spread call failed", exc_info=True)
             return None
 

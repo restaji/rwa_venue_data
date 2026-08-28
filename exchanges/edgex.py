@@ -74,7 +74,7 @@ class EdgeXAPI:
                     'max_leverage':  max_lev,
                     'contract_name': c.get('contractName', ''),
                 }
-        except Exception:
+        except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
             log.exception("EdgeX meta cache load error")
 
     def get_fees(self, contract_id: int) -> Tuple[Optional[float], Optional[float]]:
@@ -128,7 +128,7 @@ class EdgeXAPI:
                 mid_price=mid,
                 timestamp=time.time(),
             )
-        except Exception:
+        except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
             log.exception("EdgeX orderbook error for contractId=%s", contract_id)
             return None
 

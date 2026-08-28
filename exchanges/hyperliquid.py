@@ -8,7 +8,6 @@ and max leverage – all fetched dynamically from public APIs (no auth required)
 from __future__ import annotations
 
 import logging
-import math
 import time
 from typing import Dict, Optional, Tuple
 
@@ -67,103 +66,139 @@ class HyperliquidAPI:
     # ------------------------------------------------------------------
     # Fees
     # ------------------------------------------------------------------
+    ZERO_ADDRESS = "0x0000000000000000000000000000000000000001"
+
+    def _post_info(self, payload: Dict):
+        response = requests.post(self.base_url, json=payload, headers=self.headers, timeout=30)
+        if response.status_code != 200:
+            return None
+        return response.json()
+
+    def _apply_perpdex_scales(self, dexes) -> None:
+        for dex in dexes or []:
+            if not dex:
+                continue
+            scale = dex.get("deployerFeeScale")
+            if scale is None:
+                continue
+            name = dex.get("name")
+            if name == "xyz":
+                self.deployer_fee_scale = float(scale)
+            elif name == "flx":
+                self.flx_deployer_fee_scale = float(scale)
+
+    def _apply_user_fees(self, dex: str) -> None:
+        fees = self._post_info({
+            "type": "userFees",
+            "user": self.ZERO_ADDRESS,
+            "dex": dex,
+        })
+        if not isinstance(fees, dict):
+            return
+        taker = fees.get("userCrossRate")
+        maker = fees.get("userAddRate")
+        if dex == "flx":
+            if taker is not None:
+                self.flx_base_taker_rate = float(taker)
+            if maker is not None:
+                self.flx_base_maker_rate = float(maker)
+            return
+        if taker is not None:
+            self.base_taker_rate = float(taker)
+        if maker is not None:
+            self.base_maker_rate = float(maker)
+
     def _fetch_fee_config(self):
         """Fetch fee configuration from public APIs (no auth required)."""
         if time.time() - self.last_fee_fetch < self.fee_cache_ttl and self.deployer_fee_scale is not None:
             return
-
         try:
-            # 1. deployerFeeScale from perpDexs API
-            payload  = {"type": "perpDexs"}
-            response = requests.post(self.base_url, json=payload, headers=self.headers, timeout=30)
-            if response.status_code == 200:
-                dexes = response.json()
-                for dex in dexes:
-                    if dex and dex.get("name") == "xyz":
-                        v = dex.get("deployerFeeScale")
-                        if v is not None:
-                            self.deployer_fee_scale = float(v)
-                    elif dex and dex.get("name") == "flx":
-                        v = dex.get("deployerFeeScale")
-                        if v is not None:
-                            self.flx_deployer_fee_scale = float(v)
-
-            # 2. Base fee rates from userFees API (public zero-address)
-            payload  = {"type": "userFees", "user": "0x0000000000000000000000000000000000000001", "dex": "xyz"}
-            response = requests.post(self.base_url, json=payload, headers=self.headers, timeout=30)
-            if response.status_code == 200:
-                fees = response.json()
-                taker = fees.get("userCrossRate")
-                maker = fees.get("userAddRate")
-                if taker is not None:
-                    self.base_taker_rate = float(taker)
-                if maker is not None:
-                    self.base_maker_rate = float(maker)
-
-            payload  = {"type": "userFees", "user": "0x0000000000000000000000000000000000000001", "dex": "flx"}
-            response = requests.post(self.base_url, json=payload, headers=self.headers, timeout=30)
-            if response.status_code == 200:
-                fees = response.json()
-                taker = fees.get("userCrossRate")
-                maker = fees.get("userAddRate")
-                if taker is not None:
-                    self.flx_base_taker_rate = float(taker)
-                if maker is not None:
-                    self.flx_base_maker_rate = float(maker)
-
+            self._apply_perpdex_scales(self._post_info({"type": "perpDexs"}))
+            self._apply_user_fees("xyz")
+            self._apply_user_fees("flx")
             self.last_fee_fetch = time.time()
-        except Exception:
+        except (requests.RequestException, TypeError, ValueError, KeyError):
             log.exception("Error fetching HL fee config")
+
+    @staticmethod
+    def _parse_meta_payload(data) -> Tuple[list, list]:
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            universe   = data[0].get("universe", [])
+            asset_ctxs = data[1] if len(data) > 1 else []
+            return universe, asset_ctxs
+        if isinstance(data, dict):
+            return data.get("universe", []), []
+        return [], []
+
+    def _store_asset_meta(self, dex_name: str, item: Dict, funding_1h: float) -> None:
+        name = item.get("name")
+        if not name:
+            return
+        try:
+            fee_scale = float(item["deployerFeeScale"])
+        except (KeyError, TypeError, ValueError):
+            fee_scale = None
+        stripped = name.replace(f"{dex_name}:", "") if name.startswith(f"{dex_name}:") else name
+        prefixed = f"{dex_name}:{name}" if not name.startswith(f"{dex_name}:") else name
+        for key in (name, stripped, prefixed):
+            self.max_leverages_cache[key] = item.get("maxLeverage")
+            self.growth_mode_cache[key]   = item.get("growthMode") == "enabled"
+            self.funding_cache[key]       = funding_1h
+            if fee_scale is not None:
+                self.deployer_fee_scale_cache[key] = fee_scale
+
+    def _ingest_dex_metadata(self, dex_name: str) -> None:
+        payload  = {"type": "metaAndAssetCtxs", "dex": dex_name}
+        response = requests.post(self.base_url, json=payload, headers=self.headers, timeout=30)
+        if response.status_code != 200:
+            return
+        universe, asset_ctxs = self._parse_meta_payload(response.json())
+        for i, item in enumerate(universe):
+            funding_1h = float(asset_ctxs[i].get("funding", 0)) if i < len(asset_ctxs) else 0.0
+            self._store_asset_meta(dex_name, item, funding_1h)
 
     def _fetch_metadata(self):
         """Fetch metadata to get max leverage and growth mode info (xyz and flx)."""
         if time.time() - self.last_metadata_fetch < self.metadata_cache_ttl and self.max_leverages_cache:
             return
-
         try:
             self.max_leverages_cache = {}
             self.growth_mode_cache   = {}
             self.funding_cache       = {}
             self.deployer_fee_scale_cache = {}
-
             for dex_name in ("xyz", "flx"):
-                payload  = {"type": "metaAndAssetCtxs", "dex": dex_name}
-                response = requests.post(self.base_url, json=payload, headers=self.headers, timeout=30)
-                if response.status_code != 200:
-                    continue
-                data     = response.json()
-                universe = []
-                asset_ctxs = []
-                if isinstance(data, list) and len(data) >= 1:
-                    universe   = data[0].get("universe", [])
-                    asset_ctxs = data[1] if len(data) > 1 else []
-                elif isinstance(data, dict):
-                    universe = data.get("universe", [])
-
-                for i, item in enumerate(universe):
-                    name        = item.get("name")
-                    max_lev     = item.get("maxLeverage")
-                    growth_mode = item.get("growthMode")
-                    funding_1h  = float(asset_ctxs[i].get("funding", 0)) if i < len(asset_ctxs) else 0.0
-
-                    try:
-                        fee_scale = float(item["deployerFeeScale"])
-                    except (KeyError, TypeError, ValueError):
-                        fee_scale = None
-
-                    if name:
-                        stripped = name.replace(f"{dex_name}:", "") if name.startswith(f"{dex_name}:") else name
-                        prefixed = f"{dex_name}:{name}" if not name.startswith(f"{dex_name}:") else name
-                        for key in (name, stripped, prefixed):
-                            self.max_leverages_cache[key] = max_lev
-                            self.growth_mode_cache[key]   = growth_mode == "enabled"
-                            self.funding_cache[key]       = funding_1h
-                            if fee_scale is not None:
-                                self.deployer_fee_scale_cache[key] = fee_scale
-
-            self.last_metadata_fetch = time.time()
-        except Exception:
+                try:
+                    self._ingest_dex_metadata(dex_name)
+                except (requests.RequestException, TypeError, ValueError, KeyError, AttributeError, OSError):
+                    log.exception("Error ingesting HL metadata for %s", dex_name)
+            if self.max_leverages_cache:
+                self.last_metadata_fetch = time.time()
+        except (requests.RequestException, TypeError, ValueError, KeyError, AttributeError, OSError):
             log.exception("Error fetching HL metadata")
+
+    def _fee_symbol_keys(self, symbol: str) -> Tuple[bool, str, str]:
+        if self._is_flx_symbol(symbol):
+            search = self._resolve_flx_coin(symbol)  # e.g. flx:OIL-USDH -> flx:OIL
+            return True, search, search.replace("flx:", "")
+        search = symbol if symbol.startswith("xyz:") else f"xyz:{symbol}"
+        plain  = symbol.replace("xyz:", "") if symbol.startswith("xyz:") else symbol
+        return False, search, plain
+
+    def _fee_base_rates(self, is_flx: bool, search_symbol: str, plain_symbol: str):
+        growth_enabled = self.growth_mode_cache.get(
+            search_symbol, self.growth_mode_cache.get(plain_symbol, True),
+        )
+        # deployerFeeScale is published per-asset in the meta universe. The
+        # dex-level value from perpDexs is only a fallback — it was dropped from
+        # that response, so it is usually None now.
+        asset_scale = self.deployer_fee_scale_cache.get(
+            search_symbol, self.deployer_fee_scale_cache.get(plain_symbol),
+        )
+        if is_flx:
+            scale = asset_scale if asset_scale is not None else self.flx_deployer_fee_scale
+            return growth_enabled, scale, self.flx_base_taker_rate, self.flx_base_maker_rate
+        scale = asset_scale if asset_scale is not None else self.deployer_fee_scale
+        return growth_enabled, scale, self.base_taker_rate, self.base_maker_rate
 
     def _calculate_fees_for_asset(self, symbol: str) -> Tuple[Optional[float], Optional[float]]:
         """
@@ -173,48 +208,23 @@ class HyperliquidAPI:
         self._fetch_fee_config()
         self._fetch_metadata()
 
-        is_flx = self._is_flx_symbol(symbol)
-        if is_flx:
-            search_symbol = self._resolve_flx_coin(symbol)  # e.g. flx:OIL-USDH -> flx:OIL
-            plain_symbol  = search_symbol.replace("flx:", "")
-        else:
-            search_symbol = symbol if symbol.startswith("xyz:") else f"xyz:{symbol}"
-            plain_symbol  = symbol.replace("xyz:", "") if symbol.startswith("xyz:") else symbol
-
+        is_flx, search_symbol, plain_symbol = self._fee_symbol_keys(symbol)
         if search_symbol in self.fee_cache:
             return self.fee_cache[search_symbol]
 
-        growth_enabled   = self.growth_mode_cache.get(search_symbol,
-                           self.growth_mode_cache.get(plain_symbol, True))
-
-        # deployerFeeScale is published per-asset in the meta universe. The
-        # dex-level value from perpDexs is only a fallback — it was dropped from
-        # that response, so it is usually None now.
-        asset_scale = self.deployer_fee_scale_cache.get(
-            search_symbol, self.deployer_fee_scale_cache.get(plain_symbol)
+        growth_enabled, deployer_fee_scale, base_taker, base_maker = self._fee_base_rates(
+            is_flx, search_symbol, plain_symbol,
         )
-
-        if is_flx:
-            deployer_fee_scale = asset_scale if asset_scale is not None else self.flx_deployer_fee_scale
-            base_taker         = self.flx_base_taker_rate
-            base_maker         = self.flx_base_maker_rate
-        else:
-            deployer_fee_scale = asset_scale if asset_scale is not None else self.deployer_fee_scale
-            base_taker         = self.base_taker_rate
-            base_maker         = self.base_maker_rate
-
-        if base_taker is None or deployer_fee_scale is None:
+        if base_taker is None or base_maker is None or deployer_fee_scale is None:
             return (None, None)
 
         scale_if_hip3 = (deployer_fee_scale + 1) if deployer_fee_scale < 1 else (deployer_fee_scale * 2)
         growth_scale  = HYPERLIQUID_GROWTH_MODE_SCALE if growth_enabled else HYPERLIQUID_NO_GROWTH_MODE_SCALE
-
         taker_fee_bps = base_taker * 100 * scale_if_hip3 * growth_scale * 100
         maker_fee_bps = base_maker * 100 * scale_if_hip3 * growth_scale * 100
 
         self.fee_cache[search_symbol] = (taker_fee_bps, maker_fee_bps)
         self.fee_cache[plain_symbol]  = (taker_fee_bps, maker_fee_bps)
-
         return (taker_fee_bps, maker_fee_bps)
 
     def get_fees(self, symbol: str) -> Tuple[Optional[float], Optional[float]]:
@@ -296,7 +306,7 @@ class HyperliquidAPI:
             formatted_asks = [x for x in (normalize_level(a) for a in asks) if x]
 
             return {'levels': [formatted_bids, formatted_asks]}
-        except Exception:
+        except (requests.RequestException, TypeError, ValueError, KeyError, AttributeError, OSError):
             log.exception("HL l2Book error for %s", coin)
             return None
 
@@ -414,7 +424,7 @@ class HyperliquidAPI:
                 bids_def, asks_def = lvl[0], lvl[1]
                 if bids_def and asks_def:
                     true_mid = (float(bids_def[0]['px']) + float(asks_def[0]['px'])) / 2
-            except Exception:
+            except (requests.RequestException, TypeError, ValueError, KeyError, AttributeError, OSError):
                 pass
 
         # ── Fill against the default-precision book ──────────────────────────
