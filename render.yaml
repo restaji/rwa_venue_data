@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: rwa-venue-data
+    runtime: docker
+    plan: free
+    region: ohio
+    branch: fetch-update
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: ASTER_API_KEY
+        sync: false
+      - key: ASTER_SECRET_KEY
+        sync: false
+      - key: EXTENDED_API_KEY
+        sync: false
+      - key: GRVT_API_KEY
+        sync: false
+      - key: ONDO_API_KEY
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
