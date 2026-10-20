@@ -15,4 +15,4 @@ USER app
 ENV PORT=8000
 EXPOSE 8000
 
-CMD ["gunicorn", "-k", "eventlet", "-w", "1", "--bind", "0.0.0.0:8000", "app:app"]
+CMD ["sh", "-c", "exec gunicorn -k eventlet -w 1 --bind 0.0.0.0:${PORT:-8000} app:app"]
