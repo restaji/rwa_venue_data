@@ -20,7 +20,7 @@ from models import ASSETS, floor_leverage
 from exchanges.hyperliquid  import HyperliquidAPI
 from exchanges.lighter      import LighterAPI
 from exchanges.aster        import AsterAPI
-from exchanges.avantis      import AvantisAPI
+from exchanges.veranta      import VerantaAPI
 from exchanges.ostium       import OstiumAPI
 from exchanges.extended     import ExtendedAPI
 from exchanges.edgex        import EdgeXAPI
@@ -62,7 +62,7 @@ class FeeComparator:
         self.hyperliquid  = HyperliquidAPI()
         self.lighter      = LighterAPI()
         self.aster        = AsterAPI()
-        self.avantis      = AvantisAPI()
+        self.veranta      = VerantaAPI()
         self.ostium       = OstiumAPI()
         self.extended     = ExtendedAPI()
         self.edgex        = EdgeXAPI()
@@ -114,12 +114,12 @@ class FeeComparator:
             return
         log.info("GRVT: auth still in progress — background thread will complete it")
 
-    def _preload_avantis(self) -> None:
+    def _preload_veranta(self) -> None:
         try:
-            self.avantis._fetch_socket_data()
-            log.info("Avantis: pair data loaded (%d pairs)", len(self.avantis._pair_data or {}))
+            self.veranta._fetch_socket_data()
+            log.info("Veranta: pair data loaded (%d pairs)", len(self.veranta._pair_data or {}))
         except (TypeError, ValueError, KeyError, OSError):
-            log.exception("Avantis pair data load error")
+            log.exception("Veranta pair data load error")
 
     def _preload_ondo(self) -> None:
         try:
@@ -162,7 +162,7 @@ class FeeComparator:
         assets = list(ASSETS.keys())
         global_tasks = [
             self._preload_hyperliquid, self._preload_edgex, self._preload_lighter,
-            self._preload_grvt, self._preload_avantis, self._preload_ondo, self._preload_pacifica,
+            self._preload_grvt, self._preload_veranta, self._preload_ondo, self._preload_pacifica,
         ]
         per_asset_tasks = [lambda a=a: self._warm_fees(a) for a in assets]
         all_tasks = global_tasks + per_asset_tasks
@@ -200,7 +200,7 @@ class FeeComparator:
                 'hyperliquid':  config.hyperliquid_symbol,
                 'lighter':      config.symbol_key if config.lighter_market_id else None,
                 'aster':        config.aster_symbol,
-                'avantis':      config.symbol_key,
+                'avantis':      config.symbol_key if config.symbol_key in VerantaAPI.PAIRS else None,
                 'ostium':       config.ostium_symbol,
                 'extended':     config.extended_symbol,
                 'edgex':        (config.edgex_symbol or config.symbol_key) if config.edgex_contract_id else None,
@@ -250,18 +250,20 @@ class FeeComparator:
             log.exception("Aster fetch error")
             return 'aster', None, None
 
-    def _fetch_avantis(self, config, asset_key: str, order_size_usd: float, is_long: bool) -> Tuple[str, Optional[Dict], Any]:
+    def _fetch_veranta(self, config, asset_key: str, order_size_usd: float, is_long: bool) -> Tuple[str, Optional[Dict], Any]:
+        if asset_key.upper() not in VerantaAPI.PAIRS:
+            return 'avantis', None, None
         try:
-            r = self.avantis.calculate_cost(asset_key, order_size_usd, is_long=is_long)
+            r = self.veranta.calculate_cost(asset_key, order_size_usd, is_long=is_long)
             sym = None
             if r:
-                # Avantis returns its own ticker (e.g. US500/USD for pair 78);
+                # Veranta returns its own ticker (e.g. US500/USD for pair 78);
                 # fall back to the registry symbol only if the API omitted it.
                 r['symbol'] = r.get('symbol') or config.symbol_key
                 sym = r['symbol']
             return 'avantis', r, sym
         except _FETCH_ERRORS:
-            log.exception("Avantis fetch error")
+            log.exception("Veranta fetch error")
             return 'avantis', None, None
 
     def _fetch_ostium(self, config, order_size_usd: float, is_long: bool) -> Tuple[str, Optional[Dict], Any]:
@@ -405,7 +407,7 @@ class FeeComparator:
             lambda: self._fetch_hyperliquid(config, order_size_usd),
             lambda: self._fetch_lighter(config, order_size_usd),
             lambda: self._fetch_aster(config, order_size_usd),
-            lambda: self._fetch_avantis(config, asset_key, order_size_usd, is_long),
+            lambda: self._fetch_veranta(config, asset_key, order_size_usd, is_long),
             lambda: self._fetch_ostium(config, order_size_usd, is_long),
             lambda: self._fetch_extended(config, order_size_usd),
             lambda: self._fetch_edgex(config, order_size_usd, direction),
@@ -440,7 +442,7 @@ class FeeComparator:
             'edgex':       self._fees_or_none(self.edgex.get_fees,       config.edgex_contract_id),
             'grvt':        self._fees_or_none(self.grvt.get_fees,        config.grvt_instrument),
             'ondo':        self._fees_or_none(self.ondo.get_fees,        config.ondo_symbol),
-            'pacifica':    self._fees_or_none(self.pacifica.get_fees,    config.pacifica_symbol),
+            'pacifica':    self.pacifica.get_fees() if config.pacifica_symbol else (None, None),
         }
         use_maker = order_type == 'maker'
         structure = {}

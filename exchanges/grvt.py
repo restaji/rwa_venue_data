@@ -192,7 +192,7 @@ class GRVTAPI:
                 timeout=15,
             )
             self._apply_fee_tier(fee_resp)
-        except (requests.RequestException, TypeError, ValueError, KeyError, OSError):
+        except (TypeError, ValueError, KeyError, OSError):
             log.exception("GRVT fee auth error")
             self._fee_status = {
                 "code":    "auth_exception",
@@ -257,7 +257,7 @@ class GRVTAPI:
                     self._instrument_meta[name] = {
                         'funding_interval_hours': inst.get('funding_interval_hours', 8),
                     }
-        except (requests.RequestException, TypeError, ValueError, KeyError, OSError):
+        except (TypeError, ValueError, KeyError, OSError):
             log.exception("GRVT instrument meta load error")
 
     # ------------------------------------------------------------------
@@ -292,7 +292,7 @@ class GRVTAPI:
             lev = floor_leverage(brackets[0].get('max_leverage')) if brackets else None
             self._leverage_cache[instrument] = lev
             return self._leverage_cache[instrument]
-        except (requests.RequestException, TypeError, ValueError, KeyError, OSError):
+        except (TypeError, ValueError, KeyError, OSError):
             log.exception("GRVT max leverage error for %s", instrument)
             self._leverage_cache[instrument] = None
             return None
@@ -353,7 +353,7 @@ class GRVTAPI:
                 mid_price=mid,
                 timestamp=time.time(),
             )
-        except (requests.RequestException, TypeError, ValueError, KeyError, OSError):
+        except (TypeError, ValueError, KeyError, OSError):
             log.exception("GRVT orderbook error for %s", instrument)
             self._last_orderbook_debug = {
                 "code":       "orderbook_exception",

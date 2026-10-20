@@ -45,7 +45,6 @@ class PacificaAPI:
         "GOOG": "GOOGL",
         "US500": "SP500",
         "SPY": "SP500",
-        "SKHY": "SKHYNIX",
     }
 
     def __init__(self):
@@ -139,8 +138,8 @@ class PacificaAPI:
         except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
             log.exception("Pacifica: error loading /info/fees")
 
-    def get_fees(self, symbol: Optional[str] = None) -> Tuple[Optional[float], Optional[float]]:
-        """Return (taker_bps, maker_bps). Fees are venue-wide; ``symbol`` is unused."""
+    def get_fees(self) -> Tuple[Optional[float], Optional[float]]:
+        """Return (taker_bps, maker_bps). Fees are venue-wide."""
         self._load_fees()
         return self._fees
 
@@ -233,7 +232,7 @@ class PacificaAPI:
                 mid_price=anchor_mid_price, timestamp=std.timestamp,
             )
 
-        taker_fee_bps, maker_fee_bps = self.get_fees(symbol)
+        taker_fee_bps, maker_fee_bps = self.get_fees()
         if taker_fee_bps is None:
             return None
 
@@ -254,7 +253,7 @@ class PacificaAPI:
 
     def get_optimal_execution(self, symbol: str, order_size_usd: float) -> Optional[Dict]:
         """Walk the native-tick book (agg_level=1). Unfilled size stays PARTIAL."""
-        taker_fee_bps, maker_fee_bps = self.get_fees(symbol)
+        taker_fee_bps, maker_fee_bps = self.get_fees()
         if taker_fee_bps is None:
             return None
 

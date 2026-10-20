@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-exchanges/avantis.py - Avantis exchange integration.
+exchanges/veranta.py - Veranta (formerly Avantis) exchange integration.
 
-Spread numbers come from the Avantis Risk v2 API
-(https://prod-api.avantisfi.com/risk/v2), which is the same service the
+Spread numbers come from the Veranta Risk v2 API
+(https://prod-api.veranta.xyz/risk/v2), which is the same service the
 protocol itself uses at quote/execution time. Pair metadata (fees, leverage,
 OI caps, coin-denominated OI for USD→coin conversion) still comes from the
-public trading API (https://data.avantisfi.com/v2/trading).
+public trading API (https://data.veranta.xyz/v2/trading).
 
 If the Risk v2 API is unreachable, we transparently fall back to the legacy
 in-process spread formula so quotes still resolve.
@@ -26,34 +26,34 @@ from models import floor_leverage
 log = logging.getLogger(__name__)
 
 
-class AvantisAPI:
-    """Dynamic fee and spread calculation for Avantis, backed by Risk v2."""
+class VerantaAPI:
+    """Dynamic fee and spread calculation for Veranta, backed by Risk v2."""
 
-    TRADING_API = "https://data.avantisfi.com/v2/trading"
-    RISK_API    = "https://prod-api.avantisfi.com/risk/v2"
+    TRADING_API = "https://data.veranta.xyz/v2/trading"
+    RISK_API    = "https://prod-api.veranta.xyz/risk/v2"
 
     # Risk API is a POST endpoint that requires a checksummed EIP-55 address.
     # The trader identity does not influence the base spread (`spreadPctWithoutFlow10`)
     # — it only affects flow-fee bypass which we intentionally ignore below.
     DEFAULT_TRADER = os.environ.get(
-        "AVANTIS_RISK_TRADER",
-        "0x0FaE768Ef2191fB74968cd1e5D14EBd35b90Ff85",
+        "VERANTA_RISK_TRADER",
+        os.environ.get("AVANTIS_RISK_TRADER", "0x0FaE768Ef2191fB74968cd1e5D14EBd35b90Ff85"),
     )
 
     # orderType 0 = MARKET (taker). Other values (1..4, -1) map to limit / TP-SL /
     # liquidation flows; keep this at MARKET since the comparator quotes taker fills.
     ORDER_TYPE_MARKET = 0
 
-    # Avantis pair indices for all RWA (real-world asset) instruments.
-    # Sourced from https://data.avantisfi.com/v2/trading — groupIndex 2 (forex),
+    # Veranta pair indices for all RWA (real-world asset) instruments.
+    # Sourced from https://data.veranta.xyz/v2/trading — groupIndex 2 (forex),
     # 3 (commodities), and 6 (equities/indices). Every entry here must have
     # `isPairListed=True`; `_get_pair_info` enforces this at runtime so any
-    # future silent delisting (e.g. Avantis reusing pair 92 from SPCX → ZEC)
+    # future silent delisting (e.g. reusing pair 92 from SPCX → ZEC)
     # is filtered out instead of quoting the wrong asset.
     #
     # Delisted (removed): USDTRY(52), USDINR(67), USDKRW(68), USDMXN(69),
-    # USDZAR(70), USDBRL(73), USDIDR(74), USDTWD(77), USDSEK(16 — force-close
-    # announced for Monday). Also memecoins/exotics at idx 22–58 (never
+    # USDZAR(70), USDBRL(73), USDIDR(74), USDTWD(77). Also memecoins/exotics
+    # at idx 22–58 and the crypto listings mixed into 115–184 (never
     # supported here).
     PAIRS = {
         # Commodities (group 3)
@@ -62,7 +62,7 @@ class AvantisAPI:
         # Forex (group 2). Keys are normalized to <BASE><QUOTE>, matching how
         # the other venues (Ostium, Lighter, Aster) surface these pairs.
         "EURUSD": 11, "USDJPY": 12, "GBPUSD": 13,
-        "USDCAD": 14, "USDCHF": 15,
+        "USDCAD": 14, "USDCHF": 15, "USDSEK": 16,
         "AUDUSD": 17, "NZDUSD": 18, "USDSGD": 19,
         "USDCNH": 66,
 
@@ -77,7 +77,31 @@ class AvantisAPI:
         "AMD": 98, "INTC": 99, "MU": 100, "SNDK": 101, "CBRS": 102,
         "EWY": 103, "BABA": 104, "CRCL": 106, "MRVL": 107, "MSTR": 108,
         "BB": 109, "PLTR": 110, "AVGO": 111, "NFLX": 112, "CRWV": 113,
+        # 114 is the US listing (feed Equity.US.SKHY/USD, ~$140), not the
+        # KRX share (~$950) that other venues list as SKHYNIX.
         "SKHY": 114,
+        "LLY": 120, "BE": 121, "LITE": 122, "STRC": 123, "DELL": 124,
+        "NBIS": 125, "IREN": 126, "ARM": 127, "MRNA": 128, "RKLB": 129,
+        "WDC": 130, "NOW": 131,
+        "AMGN": 135, "CSCO": 136, "KLAC": 137, "LRCX": 138, "TXN": 139,
+        "PANW": 140, "APP": 141, "ALAB": 142, "DDOG": 143, "CEG": 144,
+        "SNPS": 145, "CDNS": 146, "MPWR": 147, "FTNT": 148, "ADBE": 149,
+        "INTU": 150, "ADI": 151, "TER": 152, "NXPI": 153, "SHOP": 154,
+        "WDAY": 155, "ADSK": 156, "MCHP": 157, "BKNG": 158, "MELI": 159,
+        "ISRG": 160, "TMUS": 161, "ABNB": 162, "DASH": 163, "PDD": 164,
+        "PYPL": 165, "TTWO": 166, "WMT": 167, "GILD": 168, "VRTX": 169,
+        "REGN": 170, "LIN": 171, "ADP": 172, "HON": 173, "STX": 175,
+        "AXON": 176, "VST": 177, "ANET": 178, "UBER": 179, "BA": 180,
+        "SOFI": 181, "GRAB": 182, "ASTS": 183, "BOT": 184,
+
+        # Korean equities (group 6, feed Equity.KR.<code>/KRW). These are /KRW
+        # pairs, keyed with a KRW suffix so they never share an asset with the
+        # /USD-quoted Korean perps on other venues (see models.ASSETS).
+        "NAVERKRW": 185, "HYUNDAISTEELKRW": 186, "HYUNDAIKRW": 187, "SAMSUNGKRW": 188,
+        "NHISKRW": 189, "SAMSUNGEMKRW": 190, "HDKSOEKRW": 191, "HMMKRW": 192,
+        "SKINCKRW": 193, "KAKAOKRW": 194, "HANMIKRW": 195, "LGCHEMKRW": 196,
+        "LGELECKRW": 197, "KRAFTONKRW": 198, "HANWHASYSKRW": 199, "LGESKRW": 200,
+        "KODEX200KRW": 201,
     }
 
     def __init__(self):
@@ -107,16 +131,16 @@ class AvantisAPI:
             self._group_info = data.get("groupInfo", {})
             self._last_fetch = now
         except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
-            log.exception("Avantis trading API error")
+            log.exception("Veranta trading API error")
             self._pair_data  = self._pair_data  or {}
             self._group_info = self._group_info or {}
 
     def _get_pair_info(self, asset_key: str) -> Optional[Tuple[str, Dict]]:
         """
-        Resolve `asset_key` to a live pair on Avantis. Returns None if:
+        Resolve `asset_key` to a live pair on Veranta. Returns None if:
           - The symbol isn't in our PAIRS map.
           - The trading API doesn't return that pair index.
-          - The pair is currently `isPairListed=False` (Avantis delisted it and
+          - The pair is currently `isPairListed=False` (Veranta delisted it and
             may reuse the index for a different asset — like SPCX(92) → ZEC).
         """
         self._fetch_socket_data()
@@ -128,7 +152,7 @@ class AvantisAPI:
             return None
         if not pair_info.get("isPairListed", False):
             log.info(
-                "Avantis pair %s (idx=%s) is no longer listed (from=%s to=%s); skipping",
+                "Veranta pair %s (idx=%s) is no longer listed (from=%s to=%s); skipping",
                 asset_key, pair_idx, pair_info.get("from"), pair_info.get("to"),
             )
             return None
@@ -155,7 +179,7 @@ class AvantisAPI:
             self._snapshots    = by_pair
             self._snapshots_at = now
         except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
-            log.warning("Avantis risk snapshots fetch failed", exc_info=True)
+            log.warning("Veranta risk snapshots fetch failed", exc_info=True)
             # keep the previous cache; do not clobber
 
     def _snapshots_for(self, pair_idx: int) -> List[Dict]:
@@ -220,7 +244,7 @@ class AvantisAPI:
                 return None
             return resp.json()
         except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
-            log.warning("Avantis risk /spread call failed", exc_info=True)
+            log.warning("Veranta risk /spread call failed", exc_info=True)
             return None
 
     @staticmethod
@@ -229,7 +253,7 @@ class AvantisAPI:
         spreadPct in 10-decimal precision → basis points.
         The value is *percent* scaled by 1e10 (i.e. same unit family as the trading
         API's `spreadP`, which is percent). So: raw / 1e10 = percent, * 100 → bps,
-        collapsing to raw / 1e8.  Cross-checked against the Avantis frontend
+        collapsing to raw / 1e8.  Cross-checked against the Veranta frontend
         tooltip ("0.0128% / 1.28 bps" for a $1M XAU long → raw ≈ 128_000_000).
         """
         if raw is None:
@@ -386,7 +410,7 @@ class AvantisAPI:
         def _safe(v):
             return None if v == float("inf") else v
 
-        # Use Avantis' own ticker in the response (e.g. "US500/USD", "US100/USD")
+        # Use Veranta's own ticker in the response (e.g. "US500/USD", "US100/USD")
         # rather than the caller's asset_key.
         av_from = pair_info.get("from")
         av_to   = pair_info.get("to")

@@ -64,205 +64,144 @@ class OstiumAPI:
     # ------------------------------------------------------------------
     # Fees & metadata
     # ------------------------------------------------------------------
+    @staticmethod
+    def _coerce_int(val, default: int = 0) -> int:
+        try:
+            return int(val) if val is not None else default
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _coerce_int_or_none(val):
+        if val is None:
+            return None
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _fee_p_to_bps(raw) -> Optional[float]:
+        if not isinstance(raw, (int, float, str)):
+            return None
+        try:
+            return float(raw) / 10000.0
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _first_positive_leverage(values) -> Optional[float]:
+        for lev_val in values:
+            if lev_val is None:
+                continue
+            try:
+                lev_float = float(lev_val)
+            except (TypeError, ValueError):
+                continue
+            if lev_float > 0:
+                return lev_float / 100.0
+        return None
+
+    @staticmethod
+    def _parse_pair_record(pair: Dict) -> Optional[Tuple]:
+        """Return (symbol, pair_id, cache_entry_or_None), or None if unusable."""
+        base  = pair.get('from')
+        quote = pair.get('to')
+        if not base:
+            return None
+        if not quote:
+            return None
+        symbol = f"{base}{quote}"
+        group  = pair.get('group') or {}
+        taker_fee_bps = OstiumAPI._fee_p_to_bps(pair.get('takerFeeP'))
+        maker_fee_bps = OstiumAPI._fee_p_to_bps(pair.get('makerFeeP'))
+        if taker_fee_bps is None:
+            return symbol, pair.get('id'), None
+        entry = {
+            'fee_bps':                      taker_fee_bps,
+            'maker_fee_bps':                maker_fee_bps if maker_fee_bps is not None else 0.0,
+            'max_leverage':                 floor_leverage(OstiumAPI._first_positive_leverage([
+                pair.get('maxLeverage'), pair.get('makerMaxLeverage'), group.get('maxLeverage'),
+            ])),
+            'price_impact_k':               OstiumAPI._coerce_int_or_none(pair.get('priceImpactK')),
+            'decay_rate':                   OstiumAPI._coerce_int_or_none(pair.get('decayRate')),
+            'buy_volume':                   OstiumAPI._coerce_int(pair.get('buyVolume')),
+            'sell_volume':                  OstiumAPI._coerce_int(pair.get('sellVolume')),
+            'last_update_timestamp':        OstiumAPI._coerce_int_or_none(pair.get('lastUpdateTimestamp')),
+            'rollover_fee_per_block':       int(pair.get('rolloverFeePerBlock', 0) or 0),
+            'last_rollover_long_pure':      OstiumAPI._coerce_int(pair.get('lastRolloverLongPure')),
+            'is_negative_rollover_allowed': bool(pair.get('isNegativeRolloverAllowed', False)),
+            'last_rollover_block':          OstiumAPI._coerce_int(pair.get('lastRolloverBlock')),
+            'last_funding_time':            OstiumAPI._coerce_int(pair.get('lastFundingTime')),
+            'max_oi_usd':                   OstiumAPI._coerce_int(pair.get('maxOI')) / 1e6,
+            'long_oi_raw':                  OstiumAPI._coerce_int(pair.get('longOI')),
+            'short_oi_raw':                 OstiumAPI._coerce_int(pair.get('shortOI')),
+            'last_trade_price_raw':         OstiumAPI._coerce_int(pair.get('lastTradePrice')),
+        }
+        return symbol, pair.get('id'), entry
+
+    def _ingest_pairs(self, cache: Dict, pair_id_map: Dict) -> None:
+        try:
+            response = self.session.get(self.PAIRS_URL, timeout=30)
+            if response.status_code != 200:
+                return
+            data = response.json()
+            if not isinstance(data, list):
+                return
+            for pair in data:
+                parsed = self._parse_pair_record(pair)
+                if not parsed:
+                    continue
+                symbol, p_id, entry = parsed
+                if p_id is not None:
+                    pair_id_map[str(p_id)] = symbol
+                if entry:
+                    cache[symbol] = entry
+        except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
+            log.exception("Error loading Ostium metadata from pairs API")
+
+    @staticmethod
+    def _apply_one_season_override(cache: Dict, pair_id_map: Dict, asset_item: Dict) -> None:
+        a_id    = asset_item.get('assetId')
+        new_fee = asset_item.get('newFee')
+        if a_id is None:
+            return
+        if new_fee is None:
+            return
+        aid_key = str(a_id)
+        if aid_key not in pair_id_map:
+            return
+        symbol = pair_id_map[aid_key]
+        if symbol not in cache:
+            return
+        new_fee_bps = float(new_fee) * 100.0
+        cache[symbol]['fee_bps']       = new_fee_bps
+        cache[symbol]['maker_fee_bps'] = new_fee_bps
+
+    def _apply_season_fees(self, cache: Dict, pair_id_map: Dict) -> None:
+        try:
+            seasons_url = "https://onlypoints.ostium.io/api/seasons/current"
+            headers = {'Accept': 'application/json', 'Referer': 'https://app.ostium.io/'}
+            response = self.session.get(seasons_url, headers=headers, timeout=30)
+            if response.status_code != 200:
+                return
+            assets = (((response.json().get('season') or {}).get('mode') or {}).get('assets') or [])
+            if not isinstance(assets, list):
+                return
+            for asset_item in assets:
+                self._apply_one_season_override(cache, pair_id_map, asset_item)
+        except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
+            log.exception("Error loading Ostium seasons data")
+
     def _load_cache(self) -> Dict:
         """
         Load fee, leverage, and dynamic spread metadata from Ostium `pairs` API.
         Also fetches 'seasons' data to override fees with 'newFee' if applicable.
         """
         cache: Dict = {}
-        pair_id_map: Dict = {}   # id -> symbol
-
-        # 1. Load Pairs (Base Metadata)
-        try:
-            response = self.session.get(self.PAIRS_URL, timeout=30)
-            if response.status_code == 200:
-                data = response.json()
-                if isinstance(data, list):
-                    for pair in data:
-                        base  = pair.get('from')
-                        quote = pair.get('to')
-                        p_id  = pair.get('id')
-                        if not base or not quote:
-                            continue
-                        symbol = f"{base}{quote}"
-
-                        if p_id is not None:
-                            pair_id_map[str(p_id)] = symbol
-
-                        maker_fee_p = pair.get('makerFeeP')
-                        taker_fee_p = pair.get('takerFeeP')
-                        group       = pair.get('group') or {}
-
-                        pair_max_lev  = pair.get('maxLeverage')
-                        maker_max_lev = pair.get('makerMaxLeverage')
-                        group_max_lev = group.get('maxLeverage')
-
-                        max_lev = None
-                        for lev_val in [pair_max_lev, maker_max_lev, group_max_lev]:
-                            if lev_val is not None:
-                                try:
-                                    lev_float = float(lev_val)
-                                    if lev_float > 0:
-                                        max_lev = lev_float
-                                        break
-                                except (TypeError, ValueError):
-                                    continue
-
-                        if max_lev is not None:
-                            max_lev = max_lev / 100.0
-
-                        taker_fee_bps = None
-                        maker_fee_bps = None
-
-                        if isinstance(taker_fee_p, (int, float, str)):
-                            try:
-                                taker_fee_bps = float(taker_fee_p) / 10000.0
-                            except (TypeError, ValueError):
-                                pass
-                        if isinstance(maker_fee_p, (int, float, str)):
-                            try:
-                                maker_fee_bps = float(maker_fee_p) / 10000.0
-                            except (TypeError, ValueError):
-                                pass
-
-                        price_impact_k = pair.get('priceImpactK')
-                        if price_impact_k is not None:
-                            try:
-                                price_impact_k = int(price_impact_k)
-                            except (TypeError, ValueError):
-                                price_impact_k = None
-
-                        decay_rate = pair.get('decayRate')
-                        if decay_rate is not None:
-                            try:
-                                decay_rate = int(decay_rate)
-                            except (TypeError, ValueError):
-                                decay_rate = None
-
-                        buy_volume = pair.get('buyVolume')
-                        try:
-                            buy_volume = int(buy_volume) if buy_volume is not None else 0
-                        except (TypeError, ValueError):
-                            buy_volume = 0
-
-                        sell_volume = pair.get('sellVolume')
-                        try:
-                            sell_volume = int(sell_volume) if sell_volume is not None else 0
-                        except (TypeError, ValueError):
-                            sell_volume = 0
-
-                        last_update = pair.get('lastUpdateTimestamp')
-                        if last_update is not None:
-                            try:
-                                last_update = int(last_update)
-                            except (TypeError, ValueError):
-                                last_update = None
-
-                        # Rollover / margin-fee fields
-                        last_rollover_long_pure = 0
-                        try:
-                            raw_lrlp = pair.get('lastRolloverLongPure')
-                            if raw_lrlp is not None:
-                                last_rollover_long_pure = int(raw_lrlp)
-                        except (TypeError, ValueError):
-                            pass
-
-                        is_negative_rollover_allowed = bool(
-                            pair.get('isNegativeRolloverAllowed', False)
-                        )
-
-                        last_rollover_block = 0
-                        try:
-                            rlb = pair.get('lastRolloverBlock')
-                            if rlb is not None:
-                                last_rollover_block = int(rlb)
-                        except (TypeError, ValueError):
-                            pass
-
-                        last_funding_time = 0
-                        try:
-                            lft = pair.get('lastFundingTime')
-                            if lft is not None:
-                                last_funding_time = int(lft)
-                        except (TypeError, ValueError):
-                            pass
-
-                        # OI / liquidity cap fields
-                        max_oi_usd = 0.0
-                        try:
-                            max_oi_usd = int(pair.get('maxOI', 0)) / 1e6
-                        except (TypeError, ValueError):
-                            pass
-
-                        long_oi_raw = 0
-                        try:
-                            long_oi_raw = int(pair.get('longOI', 0))
-                        except (TypeError, ValueError):
-                            pass
-
-                        short_oi_raw = 0
-                        try:
-                            short_oi_raw = int(pair.get('shortOI', 0))
-                        except (TypeError, ValueError):
-                            pass
-
-                        last_trade_price_raw = 0
-                        try:
-                            last_trade_price_raw = int(pair.get('lastTradePrice', 0))
-                        except (TypeError, ValueError):
-                            pass
-
-                        if taker_fee_bps is not None:
-                            cache[symbol] = {
-                                'fee_bps':                      taker_fee_bps,
-                                'maker_fee_bps':                maker_fee_bps if maker_fee_bps is not None else 0.0,
-                                'max_leverage':                 floor_leverage(max_lev),
-                                'price_impact_k':               price_impact_k,
-                                'decay_rate':                   decay_rate,
-                                'buy_volume':                   buy_volume,
-                                'sell_volume':                  sell_volume,
-                                'last_update_timestamp':        last_update,
-                                # rollover / margin-fee fields
-                                'rollover_fee_per_block':       int(pair.get('rolloverFeePerBlock', 0) or 0),
-                                'last_rollover_long_pure':      last_rollover_long_pure,
-                                'is_negative_rollover_allowed': is_negative_rollover_allowed,
-                                'last_rollover_block':          last_rollover_block,
-                                'last_funding_time':            last_funding_time,
-                                # OI / liquidity cap fields
-                                'max_oi_usd':                   max_oi_usd,
-                                'long_oi_raw':                  long_oi_raw,
-                                'short_oi_raw':                 short_oi_raw,
-                                'last_trade_price_raw':         last_trade_price_raw,
-                            }
-                    # blocks_per_day is fetched live via Arbitrum RPC in get_rollover_rate_24h
-
-        except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
-            log.exception("Error loading Ostium metadata from pairs API")
-
-        # 2. Load Seasons (Fee Overrides)
-        try:
-            seasons_url = "https://onlypoints.ostium.io/api/seasons/current"
-            headers = {'Accept': 'application/json', 'Referer': 'https://app.ostium.io/'}
-            response = self.session.get(seasons_url, headers=headers, timeout=30)
-            if response.status_code == 200:
-                s_data  = response.json()
-                season  = s_data.get('season', {})
-                mode    = season.get('mode', {})
-                assets  = mode.get('assets', [])
-                if isinstance(assets, list):
-                    for asset_item in assets:
-                        a_id    = asset_item.get('assetId')
-                        new_fee = asset_item.get('newFee')
-                        aid_key = str(a_id) if a_id is not None else None
-                        if aid_key is not None and new_fee is not None and aid_key in pair_id_map:
-                            symbol = pair_id_map[aid_key]
-                            if symbol in cache:
-                                new_fee_bps = float(new_fee) * 100.0
-                                cache[symbol]['fee_bps']       = new_fee_bps
-                                cache[symbol]['maker_fee_bps'] = new_fee_bps
-        except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
-            log.exception("Error loading Ostium seasons data")
-
+        pair_id_map: Dict = {}
+        self._ingest_pairs(cache, pair_id_map)
+        self._apply_season_fees(cache, pair_id_map)
         return cache
 
     def get_fee_bps(self, ostium_symbol: str) -> Optional[float]:

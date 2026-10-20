@@ -47,6 +47,35 @@ class OndoAPI:
     # ------------------------------------------------------------------
     # Markets metadata (fees + leverage)
     # ------------------------------------------------------------------
+    @staticmethod
+    def _max_lev_from_brackets(margin_info) -> Optional[int]:
+        max_lev = None
+        for bracket in margin_info:
+            lev = floor_leverage(bracket.get("maxLeverage"))
+            if lev is None:
+                continue
+            if max_lev is None or lev > max_lev:
+                max_lev = lev
+        return max_lev
+
+    @staticmethod
+    def _parse_market_row(m) -> Optional[Tuple[str, Dict]]:
+        market = m.get("market")
+        if not market:
+            return None
+        try:
+            taker_bps = float(m.get("takerFee", 0)) * 10000
+            maker_bps = float(m.get("makerFee", 0)) * 10000
+        except (TypeError, ValueError):
+            taker_bps = maker_bps = None
+        margin_info = m.get("marginInfo") or []
+        return market, {
+            "taker_fee_bps": taker_bps,
+            "maker_fee_bps": maker_bps,
+            "max_leverage":  OndoAPI._max_lev_from_brackets(margin_info),
+            "margin_info":   margin_info,
+        }
+
     def _load_markets(self, force: bool = False) -> None:
         now = time.time()
         if not force and self._markets_cache and (now - self._markets_ts) < self.MARKETS_TTL:
@@ -56,34 +85,14 @@ class OndoAPI:
             if resp.status_code != 200:
                 log.warning("Ondo: /markets returned HTTP %s", resp.status_code)
                 return
-            data  = resp.json()
-            pairs = (data.get("result", {}).get("perps", {}) or {}).get("tradingPairs") or []
+            pairs = (resp.json().get("result", {}).get("perps", {}) or {}).get("tradingPairs") or []
             cache: Dict[str, Dict] = {}
             for m in pairs:
-                market = m.get("market")
-                if not market:
+                parsed = self._parse_market_row(m)
+                if not parsed:
                     continue
-                try:
-                    taker_bps = float(m.get("takerFee", 0)) * 10000
-                    maker_bps = float(m.get("makerFee", 0)) * 10000
-                except (TypeError, ValueError):
-                    taker_bps = maker_bps = None
-
-                margin_info = m.get("marginInfo") or []
-                max_lev = None
-                for bracket in margin_info:
-                    lev = floor_leverage(bracket.get("maxLeverage"))
-                    if lev is None:
-                        continue
-                    if max_lev is None or lev > max_lev:
-                        max_lev = lev
-
-                cache[market] = {
-                    "taker_fee_bps": taker_bps,
-                    "maker_fee_bps": maker_bps,
-                    "max_leverage":  max_lev,
-                    "margin_info":   margin_info,
-                }
+                market, row = parsed
+                cache[market] = row
             if cache:
                 self._markets_cache = cache
                 self._markets_ts    = now

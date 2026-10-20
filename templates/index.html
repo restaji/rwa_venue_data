@@ -120,7 +120,7 @@
         </section>
 
         <footer class="footer">
-            <p>Hyperliquid · Lighter · Aster · Avantis · Ostium · Extended · EdgeX · GRVT · Pacifica</p>
+            <p>Hyperliquid · Lighter · Aster · Veranta · Ostium · Extended · EdgeX · GRVT · Pacifica</p>
         </footer>
     </div>
 
@@ -177,7 +177,7 @@
             avantis: {
                 logo: 'https://s1.coincarp.com/logo/1/avantis.png?style=200&v=1757294589',
                 color: '#a78bfa',
-                name: 'Avantis'
+                name: 'Veranta'
             },
             ostium: {
                 logo: 'https://portal.arbitrum.io/_next/image?url=https%3A%2F%2Fportal-data.arbitrum.io%2Fimages%2Fprojects%2Fostium-logo.webp&w=256&q=75',
@@ -229,13 +229,13 @@
          *   Long  adjustment: +rate_bps
          *   Short adjustment: -rate_bps
          *
-         * For exchanges with direction-specific rates (Avantis, Ostium):
+         * For exchanges with direction-specific rates (Veranta, Ostium):
          *   rates are already per-side, so always add (positive = that side pays).
          */
         function getHoldingFeeBps(exData, direction) {
             const pctToBps = pct => pct * 100;
 
-            // Direction-specific rates (Avantis, Ostium)
+            // Direction-specific rates (Veranta, Ostium)
             if (exData.holding_fee_24h_long_pct !== undefined ||
                 exData.holding_fee_24h_short_pct !== undefined) {
                 const pct = direction === 'long'

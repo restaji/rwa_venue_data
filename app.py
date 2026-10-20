@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+  #!/usr/bin/env python3
 """
 app.py - Flask application, REST routes, and WebSocket handlers.
 

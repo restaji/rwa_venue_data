@@ -117,7 +117,7 @@ class HyperliquidAPI:
             self._apply_user_fees("xyz")
             self._apply_user_fees("flx")
             self.last_fee_fetch = time.time()
-        except (requests.RequestException, TypeError, ValueError, KeyError):
+        except (TypeError, ValueError, KeyError, OSError):
             log.exception("Error fetching HL fee config")
 
     @staticmethod
@@ -169,11 +169,11 @@ class HyperliquidAPI:
             for dex_name in ("xyz", "flx"):
                 try:
                     self._ingest_dex_metadata(dex_name)
-                except (requests.RequestException, TypeError, ValueError, KeyError, AttributeError, OSError):
+                except (TypeError, ValueError, KeyError, AttributeError, OSError):
                     log.exception("Error ingesting HL metadata for %s", dex_name)
             if self.max_leverages_cache:
                 self.last_metadata_fetch = time.time()
-        except (requests.RequestException, TypeError, ValueError, KeyError, AttributeError, OSError):
+        except (TypeError, ValueError, KeyError, AttributeError, OSError):
             log.exception("Error fetching HL metadata")
 
     def _fee_symbol_keys(self, symbol: str) -> Tuple[bool, str, str]:
@@ -265,12 +265,36 @@ class HyperliquidAPI:
     _BOOK_RETRIES     = 3
     _BOOK_RETRY_DELAY = 0.4
 
+    @staticmethod
+    def _normalize_level(lvl):
+        if isinstance(lvl, dict):
+            return lvl
+        if isinstance(lvl, list) and len(lvl) >= 2:
+            return {'px': str(lvl[0]), 'sz': str(lvl[1])}
+        return None
+
+    def _parse_l2_book(self, response) -> Optional[Dict]:
+        data = response.json()
+        if not data:
+            return None
+        levels = data.get('levels', [])
+        if not isinstance(levels, list) or len(levels) < 2:
+            return None
+        bids = levels[0] if isinstance(levels[0], list) else []
+        asks = levels[1] if isinstance(levels[1], list) else []
+        if not bids or not asks:
+            return None
+        formatted_bids = [x for x in (self._normalize_level(b) for b in bids) if x]
+        formatted_asks = [x for x in (self._normalize_level(a) for a in asks) if x]
+        return {'levels': [formatted_bids, formatted_asks]}
+
     def _fetch_coin(self, coin: str, n_sig_figs: Optional[int]) -> Optional[Dict]:
         payload = {"type": "l2Book", "coin": coin}
         if n_sig_figs is not None:
             payload["nSigFigs"] = n_sig_figs
 
         try:
+            response = None
             for attempt in range(self._BOOK_RETRIES):
                 response = requests.post(self.base_url, json=payload, headers=self.headers, timeout=30)
                 if response.status_code == 200:
@@ -281,32 +305,8 @@ class HyperliquidAPI:
                 log.warning("HL l2Book %s failed: HTTP %s %s",
                             coin, response.status_code, response.text[:120])
                 return None
-
-            data = response.json()
-            if not data:
-                return None
-
-            levels = data.get('levels', [])
-            if not isinstance(levels, list) or len(levels) < 2:
-                return None
-
-            bids = levels[0] if isinstance(levels[0], list) else []
-            asks = levels[1] if isinstance(levels[1], list) else []
-            if not bids or not asks:
-                return None
-
-            def normalize_level(lvl):
-                if isinstance(lvl, dict):
-                    return lvl
-                if isinstance(lvl, list) and len(lvl) >= 2:
-                    return {'px': str(lvl[0]), 'sz': str(lvl[1])}
-                return None
-
-            formatted_bids = [x for x in (normalize_level(b) for b in bids) if x]
-            formatted_asks = [x for x in (normalize_level(a) for a in asks) if x]
-
-            return {'levels': [formatted_bids, formatted_asks]}
-        except (requests.RequestException, TypeError, ValueError, KeyError, AttributeError, OSError):
+            return self._parse_l2_book(response)
+        except (TypeError, ValueError, KeyError, AttributeError, OSError):
             log.exception("HL l2Book error for %s", coin)
             return None
 
@@ -403,6 +403,26 @@ class HyperliquidAPI:
 
         return result
 
+    @staticmethod
+    def _true_mid_from_raw(raw_default) -> Optional[float]:
+        if not raw_default:
+            return None
+        try:
+            lvl = raw_default.get('levels', [[], []])
+            bids_def, asks_def = lvl[0], lvl[1]
+            if not bids_def:
+                return None
+            if not asks_def:
+                return None
+            return (float(bids_def[0]['px']) + float(asks_def[0]['px'])) / 2
+        except (TypeError, ValueError, KeyError, AttributeError, OSError):
+            return None
+
+    def _hl_display_symbol(self, symbol: str) -> str:
+        if self._is_flx_symbol(symbol):
+            return symbol if symbol.startswith("flx:") else f"flx:{symbol}"
+        return symbol if 'xyz' in str(symbol) else f'xyz:{symbol}'
+
     def get_optimal_execution(self, symbol: str, order_size_usd: float) -> Optional[Dict]:
         """
         Flow:
@@ -414,43 +434,23 @@ class HyperliquidAPI:
         if taker_fee_bps is None:
             return None
 
-        # ── Fetch default precision and pin true mid ─────────────────────────
         raw_default = self.get_orderbook(symbol, n_sig_figs=None)
-        true_mid: Optional[float] = None
+        true_mid = self._true_mid_from_raw(raw_default)
+        std_default = self.normalize_orderbook(raw_default) if raw_default else None
+        if not std_default:
+            return None
 
-        if raw_default:
-            try:
-                lvl = raw_default.get('levels', [[], []])
-                bids_def, asks_def = lvl[0], lvl[1]
-                if bids_def and asks_def:
-                    true_mid = (float(bids_def[0]['px']) + float(asks_def[0]['px'])) / 2
-            except (requests.RequestException, TypeError, ValueError, KeyError, AttributeError, OSError):
-                pass
+        result = ExecutionCalculator.calculate_execution_cost(
+            std_default, order_size_usd, open_fee_bps=taker_fee_bps
+        )
+        if not result:
+            return None
 
-        # ── Fill against the default-precision book ──────────────────────────
-        final_result = None
-        std_default  = self.normalize_orderbook(raw_default) if raw_default else None
-
-        if std_default:
-            result = ExecutionCalculator.calculate_execution_cost(
-                std_default, order_size_usd, open_fee_bps=taker_fee_bps
-            )
-            if result:
-                final_result = result
-                final_result['fee_bps']       = taker_fee_bps
-                final_result['maker_fee_bps'] = maker_fee_bps
-                final_result['sig_figs']      = 'Maximum'
-
-        # ── Attach metadata ──────────────────────────────────────────────────
-        if final_result:
-            is_flx = self._is_flx_symbol(symbol)
-            final_result['is_xyz']       = not is_flx
-            if is_flx:
-                display_symbol = symbol if symbol.startswith("flx:") else f"flx:{symbol}"
-            else:
-                display_symbol = symbol if 'xyz' in str(symbol) else f'xyz:{symbol}'
-            final_result['symbol']       = display_symbol
-            final_result['max_leverage'] = self.get_max_leverage(symbol)
-            final_result['true_mid']     = true_mid
-
-        return final_result
+        result['fee_bps']       = taker_fee_bps
+        result['maker_fee_bps'] = maker_fee_bps
+        result['sig_figs']      = 'Maximum'
+        result['is_xyz']        = not self._is_flx_symbol(symbol)
+        result['symbol']        = self._hl_display_symbol(symbol)
+        result['max_leverage']  = self.get_max_leverage(symbol)
+        result['true_mid']      = true_mid
+        return result

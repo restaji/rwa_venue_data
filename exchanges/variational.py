@@ -71,6 +71,29 @@ class VariationalAPI:
         "TSLA": {"underlying": "TSLA", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Tesla
         "TSM":  {"underlying": "TSM",  "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # TSMC
         "USAR": {"underlying": "USAR", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # USA Rare Earth
+        "SKHY": {"underlying": "SKHY", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # SK Hynix (US listing)
+        "LLY":  {"underlying": "LLY",  "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Eli Lilly
+        "BE":   {"underlying": "BE",   "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Bloom Energy
+        "STRC": {"underlying": "STRC", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Strategy (STRC)
+        "DELL": {"underlying": "DELL", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Dell
+        "NBIS": {"underlying": "NBIS", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Nebius
+        "IREN": {"underlying": "IREN", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # IREN
+        "ARM":  {"underlying": "ARM",  "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Arm Holdings
+        "MRNA": {"underlying": "MRNA", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Moderna
+        "NOW":  {"underlying": "NOW",  "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # ServiceNow
+        "CSCO": {"underlying": "CSCO", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Cisco
+        "KLAC": {"underlying": "KLAC", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # KLA
+        "TXN":  {"underlying": "TXN",  "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Texas Instruments
+        "APP":  {"underlying": "APP",  "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # AppLovin
+        "ALAB": {"underlying": "ALAB", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Astera Labs
+        "ADBE": {"underlying": "ADBE", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Adobe
+        "TER":  {"underlying": "TER",  "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Teradyne
+        "SHOP": {"underlying": "SHOP", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Shopify
+        "TTWO": {"underlying": "TTWO", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Take-Two
+        "WMT":  {"underlying": "WMT",  "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Walmart
+        "UBER": {"underlying": "UBER", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # Uber
+        "SOFI": {"underlying": "SOFI", "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # SoFi
+        "BOT":  {"underlying": "BOT",  "instrument_type": "perpetual_rwa_future", "kind": "equity"},  # RoboStrategy
         # ETFs
         "US100": {"underlying": "QQQ",   "instrument_type": "perpetual_rwa_future", "kind": "ETF"},  # Nasdaq-100 (Variational ticker: QQQ)
         "US500": {"underlying": "US500", "instrument_type": "perpetual_rwa_future", "kind": "ETF"},  # S&P 500
@@ -175,6 +198,27 @@ class VariationalAPI:
     _ARR   = r'\[(?:[^\[\]{}]|\$\{[^}]*\}|' + _OBJ + r')*\]'
 
     @classmethod
+    def _ingest_ge_objects(cls, content: str, ge_default: Optional[float], equity: Dict[str, float]) -> None:
+        for om in re.finditer(cls._OBJ, content):
+            obj = om.group(0)
+            sm = re.search(r'symbol:"([^"]+)"', obj)
+            if not sm:
+                continue
+            ticker = sm.group(1).upper()
+            lm = re.search(r'max_leverage:"(\d+)"', obj)
+            if lm:
+                equity[ticker] = float(lm.group(1))
+            elif ge_default is not None:
+                equity[ticker] = ge_default
+
+    @classmethod
+    def _ingest_bare_tickers(cls, content: str, ge_default: Optional[float], equity: Dict[str, float]) -> None:
+        if ge_default is None:
+            return
+        for bm in re.finditer(r'"([^"]+)"', re.sub(cls._OBJ, '', content)):
+            equity.setdefault(bm.group(1).upper(), ge_default)
+
+    @classmethod
     def _parse_equity(cls, text: str) -> Dict[str, float]:
         equity: Dict[str, float] = {}
 
@@ -191,21 +235,8 @@ class VariationalAPI:
             if not am:
                 continue
             content = am.group(1)
-            # Objects: explicit symbol, with an optional per-symbol override.
-            for om in re.finditer(cls._OBJ, content):
-                obj = om.group(0)
-                sm = re.search(r'symbol:"([^"]+)"', obj)
-                if not sm:
-                    continue
-                lm = re.search(r'max_leverage:"(\d+)"', obj)
-                if lm:
-                    equity[sm.group(1).upper()] = float(lm.group(1))
-                elif ge_default is not None:
-                    equity[sm.group(1).upper()] = ge_default
-            # Remaining bare "TICKER" strings inherit Ge's default.
-            if ge_default is not None:
-                for bm in re.finditer(r'"([^"]+)"', re.sub(cls._OBJ, '', content)):
-                    equity.setdefault(bm.group(1).upper(), ge_default)
+            cls._ingest_ge_objects(content, ge_default, equity)
+            cls._ingest_bare_tickers(content, ge_default, equity)
 
         # Legacy fallback: standalone ``TICKER:{name:"…",max_leverage:"N"}`` shape.
         for em in re.finditer(r'(\w+):\{name:"[^"]*"' + cls._INNER + r'max_leverage:"(\d+)"', text):
@@ -237,11 +268,23 @@ class VariationalAPI:
 
         Current Omni helper (var names drift across redeploys)::
 
-            <t>.max_leverage;if(<r>)return <r>}return <e>&&<ts>(<e>)?<Lr>:<Fr>}
+            return t||(<Te>(e)?<Nt>:e&&<nn>(e)?<Pt>:<Ct>)
 
-        ``ts(e)`` is ``!!e.asset_class`` — any RWA with an asset_class (equity,
+        ``nn(e)`` is ``!!e.asset_class`` — any RWA with an asset_class (equity,
         commodity, ETF, …) gets the tradfi cap; crypto perps get the default.
+        Older bundles used ``<t>.max_leverage;if(<r>)return <r>}…`` instead.
         """
+        # Current: an(e.symbol);return t||(Te(e)?Nt:e&&nn(e)?Pt:Ct)
+        m = re.search(
+            r"\.symbol\)&&\w+\(\w+\.symbol\);return \w+\|\|"
+            r"\(\w+\(\w+\)\?(\w+):\w+&&\w+\(\w+\)\?(\w+):(\w+)\)\}",
+            text,
+        )
+        if m:
+            tradfi = self._resolve_numeric_const(text, m.group(2), url)
+            crypto = self._resolve_numeric_const(text, m.group(3), url)
+            return tradfi, crypto
+
         m = re.search(
             r"\w+\.max_leverage;if\((\w+)\)return \1\}return \w+&&\w+\(\w+\)\?(\w+):(\w+)\}",
             text,
@@ -286,6 +329,26 @@ class VariationalAPI:
             return True
         return any(spec["underlying"].upper() == s for spec in self.VARIATIONAL_INSTRUMENTS.values())
 
+    def _scan_bundle_text(self, text, url, equity, tradfi_default, crypto_default, taker_fee_bps):
+        for ticker, lev in self._parse_equity(text).items():
+            equity.setdefault(ticker, lev)
+        if crypto_default is None or tradfi_default is None:
+            parsed_tradfi, parsed_crypto = self._parse_leverage_defaults(text, url)
+            if tradfi_default is None and parsed_tradfi is not None:
+                tradfi_default = parsed_tradfi
+            if crypto_default is None and parsed_crypto is not None:
+                crypto_default = parsed_crypto
+        if taker_fee_bps is None:
+            fm = re.search(r'futures_taker_fee:"?(\d+(?:\.\d+)?)"?', text)
+            if fm:
+                taker_fee_bps = float(fm.group(1)) * 10000.0
+        return tradfi_default, crypto_default, taker_fee_bps
+
+    @staticmethod
+    def _config_complete(crypto_default, tradfi_default, equity, taker_fee_bps) -> bool:
+        have_defaults = crypto_default is not None and (tradfi_default is not None or equity)
+        return have_defaults and taker_fee_bps is not None
+
     def get_app_config(self) -> Dict:
         """Live app config matching the Omni UI's max-leverage helper:
 
@@ -318,38 +381,15 @@ class VariationalAPI:
             except (TypeError, ValueError, KeyError, AttributeError, OSError, RuntimeError):
                 continue
 
-            for ticker, lev in self._parse_equity(text).items():
-                equity.setdefault(ticker, lev)
-
-            if crypto_default is None or tradfi_default is None:
-                parsed_tradfi, parsed_crypto = self._parse_leverage_defaults(text, url)
-                if tradfi_default is None and parsed_tradfi is not None:
-                    tradfi_default = parsed_tradfi
-                if crypto_default is None and parsed_crypto is not None:
-                    crypto_default = parsed_crypto
-
-            if taker_fee_bps is None:
-                fm = re.search(r'futures_taker_fee:"?(\d+(?:\.\d+)?)"?', text)
-                if fm:
-                    # Config stores the fee as a rate fraction (e.g. 0.0004 = 4
-                    # bps); convert to bps. Currently 0 on Omni (spread-only).
-                    taker_fee_bps = float(fm.group(1)) * 10000.0
-
-            have_defaults = crypto_default is not None and (
-                tradfi_default is not None or equity
+            tradfi_default, crypto_default, taker_fee_bps = self._scan_bundle_text(
+                text, url, equity, tradfi_default, crypto_default, taker_fee_bps,
             )
-            if have_defaults and taker_fee_bps is not None:
+            if self._config_complete(crypto_default, tradfi_default, equity, taker_fee_bps):
                 break
-
             for rel in self._IMPORT_RE.findall(text):
                 queue.append(urljoin(url, rel))
 
-        if (
-            crypto_default is None
-            and tradfi_default is None
-            and taker_fee_bps is None
-            and not equity
-        ):
+        if crypto_default is None and tradfi_default is None and taker_fee_bps is None and not equity:
             raise RuntimeError("could not locate app config in the bundle")
 
         return {
@@ -432,6 +472,33 @@ class VariationalAPI:
     # Public interface
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _quote_fields(quote: Dict, qty):
+        bid = float(quote["bid"])
+        ask = float(quote["ask"])
+        mark_price = float(quote["mark_price"])
+        try:
+            index_price = float(quote["index_price"])
+        except (KeyError, TypeError, ValueError):
+            index_price = None
+        try:
+            filled_qty = float(quote.get("qty", qty))
+        except (TypeError, ValueError):
+            filled_qty = qty
+        return bid, ask, mark_price, index_price, filled_qty
+
+    @staticmethod
+    def _quote_filled(quote: Dict, qty) -> bool:
+        limits = quote.get("qty_limits") or {}
+        try:
+            max_qty = min(
+                float(limits["bid"]["max_qty"]),
+                float(limits["ask"]["max_qty"]),
+            )
+            return qty <= max_qty
+        except (KeyError, TypeError, ValueError):
+            return True
+
     def calculate_cost(
         self,
         asset_key: str,
@@ -466,29 +533,17 @@ class VariationalAPI:
             return None
 
         try:
-            bid = float(quote["bid"])
-            ask = float(quote["ask"])
-            mark_price = float(quote["mark_price"])
+            bid, ask, mark_price, index_price, filled_qty = self._quote_fields(quote, qty)
         except (KeyError, TypeError, ValueError):
             return None
-
-        try:
-            index_price = float(quote["index_price"])
-        except (KeyError, TypeError, ValueError):
-            index_price = None
-
-        try:
-            filled_qty = float(quote.get("qty", qty))
-        except (TypeError, ValueError):
-            filled_qty = qty
 
         mid = (bid + ask) / 2.0
         if mid <= 0:
             return None
 
         # Per-side slippage from the live quote midpoint.
-        buy_slip_bps  = (ask - mid) / mid * 10000.0   # cost to open/close a long buy
-        sell_slip_bps = (mid - bid) / mid * 10000.0   # cost to open/close a short sell
+        buy_slip_bps  = (ask - mid) / mid * 10000.0
+        sell_slip_bps = (mid - bid) / mid * 10000.0
         avg_slip_bps  = (buy_slip_bps + sell_slip_bps) / 2.0
         spread_bps    = (ask - bid) / mid * 10000.0
 
@@ -502,21 +557,8 @@ class VariationalAPI:
             log.warning("Variational: taker fee unavailable for %s — skipping venue", display)
             return None
 
-        # Round-trip cost = full spread + open fee + close fee.
         total_cost_bps = buy_slip_bps + sell_slip_bps + 2.0 * fee_bps
-
-        # The OLP can quote enormous sizes; treat the quote as fully filled
-        # unless it explicitly caps qty below what we asked for.
-        filled = True
-        limits = quote.get("qty_limits") or {}
-        try:
-            max_qty = min(
-                float(limits["bid"]["max_qty"]),
-                float(limits["ask"]["max_qty"]),
-            )
-            filled = qty <= max_qty
-        except (KeyError, TypeError, ValueError):
-            pass
+        filled = self._quote_filled(quote, qty)
 
         filled_usd = filled_qty * mark_price
         notional   = qty * mark_price

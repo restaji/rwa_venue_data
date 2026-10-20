@@ -54,7 +54,7 @@ class LighterAPI:
             for market in response.json().get('order_book_details', []):
                 self._cache_one_market(market)
             self.market_cache_loaded = True
-        except (requests.RequestException, TypeError, ValueError, KeyError, OSError):
+        except (TypeError, ValueError, KeyError, OSError):
             log.exception("Error loading Lighter market cache")
 
     def _market_key(self, market_id: Optional[int]) -> Optional[int]:
@@ -94,7 +94,7 @@ class LighterAPI:
             response = requests.get(url, headers=self.headers, timeout=30)
             response.raise_for_status()
             return response.json()
-        except (requests.RequestException, TypeError, ValueError, KeyError, OSError):
+        except (TypeError, ValueError, KeyError, OSError):
             log.exception("Lighter get_orderbook error for market_id=%s", market_id)
             return None
 
